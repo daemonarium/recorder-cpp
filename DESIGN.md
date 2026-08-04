@@ -1,10 +1,10 @@
 # Recorder (WASM) — design notes
 
-Status: **design only** (not implemented).  
-Sibling: [`debug-store/`](../debug-store/) (persistence sink).  
+Status: **implemented** (see [`README.md`](./README.md)).  
+Sibling: [`debug-store`](../debug-store/) (persistence sink).  
 Kernel model: [`ts-kernel/README.md`](../ts-kernel/README.md) — *Process recording and replay*.
 
-This document captures agreed decisions before implementation. Update it when the design changes.
+This document captures agreed decisions. Update it when the design changes.
 
 ---
 
@@ -27,193 +27,128 @@ Recording I/O + snapshots is critical for post-mortem replay. Logs/spans/metrics
 | Piece | Responsibility |
 |-------|----------------|
 | **Kernel** | Emits ordered monitor events; `save` returns `save_result`; backpressure via socket buffers |
-| **kernel-shield** | Capability boundary; must forward full kernel `monitor(…, config)` and `save` → `save_result` (see *Shield lag* below) |
+| **kernel-shield** | Capability boundary; forwards full kernel `monitor(…, config)` and `save` → `save_result` |
 | **recorder** (this module) | Multi-target capture policy, RAM window, rotation, dump triggers, log forward; **is the monitor** (calls `monitor` itself) |
 | **debug-store** | Durable session files via ts-fs; recorder is a `begin` + session client |
 
 Host-only FS stays in `ts-fs`. Recorder does not touch the filesystem directly.
 
-### Shield lag (confirmed in tree)
+---
 
-Kernel contract (`cpp-rpc` / `ts-kernel`) already has:
+## Per-target `record_config`
 
-- `monitor(target, monitor, monitor_socket, monitor_config)`
-- `save(id) → save_result { snapshot_uid, memory, mana_used, mana_limit }`
-
-**kernel-shield is behind** that update:
-
-- Shield / `kernel_rpc` `monitor` takes **3 args** (no `monitor_config`); spawn-path `monitor(id, 1, MONITOR)` likewise.
-- Shield `save` is typed as **`promise<binary>`**, not `save_result`.
-
-This is incomplete shield sync with the kernel API — **must be fixed before recorder implementation**. ts-test mock already accepts `_config` when talking to the real kernel.
+| Field | Meaning |
+|-------|---------|
+| `event_buffer_snapshot_mult` | `1` or `2` only (else `recorder_invalid_argument`). Threshold = `k * anchor.memory.size()` |
+| `record_mana` | If true, subscribe/append `MANA` monitor frames (`process_measure_mana_event` / `process_set_mana_limit_event`) |
+| `dump_on_error` | If true, auto-dump complete window on `process_error_event` (do **not** seal store) |
 
 ---
 
 ## Topology (conceptual)
 
 ```
-                    USER RPC (start/stop/dump/rotate/…)
+                    USER RPC (start/stop/dump/rotate)
 Client ───────────────────────────────────────────► recorder.wasm
                                                          │
               per-target MONITOR socket (kernel events)  │
               per-target LOG ingress socket              │
-              kernel-shield API (monitor/save/…)         │
+              kernel-shield API (monitor/save/bind)      │
                                                          ▼
                                                    kernel-shield → kernel
 
 recorder ── debug_store.begin + session ──► debug-store.wasm ──► ts-fs
               live: logs / spans / metrics
-              dump: snapshot + I/O window
+              dump: snapshot + opaque I/O frames
 ```
 
 - **One recorder process, many targets**: each target → own monitor socket, own log ingress socket, own RAM window / state machine.
-- **Monitor socket = monitoring only.**
-- **Log/span/metric ingress = socket per target** (not multiplexed on one shared socket).
 - Recorder calls `monitor(target, recorder_pid, monitor_socket, config)` and `save(target)` itself.
+- Host binds `recorder.SHIELD (1) ↔ kernel-shield.USER (0)` before start.
+- On `start_recording`, recorder uses `shield.bind` to attach to debug-store USER then session socket.
+
+### Socket map
+
+| ID | Role |
+|----|------|
+| 0 | USER — `recorder` RPC |
+| 1 | SHIELD — outbound to kernel-shield |
+| ≥2 | dynamic: per-target monitor, log ingress, store USER (temp), store session |
 
 ---
 
 ## Starting a recording
 
-API shape TBD in codegen. Behaviour:
+1. Validate `record_config` (`event_buffer_snapshot_mult` ∈ {1,2}).
+2. `debug_store.begin(…)` → bind session socket. Session **lives until recording stop**.
+3. Open **monitor** + **log ingress** sockets for this target.
+4. `monitor(target, recorder, monitor_socket, config)` via shield.
+5. Mandatory initial `save(target)`; wait until **both** `save_result` and matching `process_save_event` install the first anchor.
+6. Start-recording RPC returns only when setup is done.
 
-1. `debug_store.begin(…)` → bind session socket. Session **lives until recording stop** (so late log messages still in queues can be flushed).
-2. Open **monitor** socket + **log ingress** socket for this target.
-3. `monitor(target, recorder, monitor_socket, config)` via shield.
-4. Mandatory initial `save(target)`.
-5. Start-recording RPC returns only when setup is done.
+**Events before the first complete anchor** are **discarded**.
 
-**Events before the first `process_save_event`** for this recording are **discarded** (recording may start mid-lifetime).
-
-`INITIAL_BUFFER_*` / `BUFFER_*` are **not** subscribed / not handled — buffer state is already inside linear memory in `save`.
+`INITIAL_BUFFER_*` / `BUFFER_*` are **not** subscribed.
 
 ---
 
 ## In-RAM window (per target)
 
 ```
-anchor:  { snapshot_uid, memory, mana_used, mana_limit }  // memory from save RPC result
-events:  byte-append FIFO of I/O monitor frames after that anchor
-state:   Idle | RotatePending | Dumping | …
+anchor:  save_result { snapshot_uid, memory, mana_used, mana_limit }
+io_bytes: append of whole length-prefixed monitor wire frames (opaque)
+state:   Starting | Idle | RotatePending | Dumping | Stopping
 ```
 
-### Stored in RAM
+### Appended to `io_bytes` (raw frames)
 
-- Last **snapshot** from `save_result` (response).
-- **I/O replay events** after the anchor — whatever is required to replay the process **without the whole external ENV**:
-  - `COPY` (+ `COPY_PAYLOAD`), `DATA`, `DRAIN`
-  - plus `SAVE` (anchor markers in the stream)
-  - `ERROR` as dump trigger (whether the error event itself is appended to the dump buffer is an implementation detail; dump is driven by the event)
-  - `MANA` if external mana changes must be replayable (include if needed for fidelity)
+- `COPY` (+ payload when `COPY_PAYLOAD`), `DATA`, `DRAIN`
+- `MANA` frames iff `record_mana`
+- Not: `SAVE` (cut marker only), `INITIAL_*`, `BUFFER_*`, `KILLED` (no dump), bare `ERROR` (trigger only)
 
-### Not in RAM
+### Byte threshold
 
-- Logs / spans / metrics — **forwarded to debug-store immediately**; no rotation; not part of the death window.
-
-### Byte threshold (relative to last stored snapshot)
-
-- Limit is **bytes only** (event count irrelevant).
-- Threshold ≈ **k × size of the current anchored snapshot** (e.g. 1× or 2×), using the **last installed** `memory.size()`.
-- After `memory.grow`, the **next** `save` yields a larger snapshot → threshold grows with it.
-- Rationale: if the event log is much larger than a fresh snapshot, it is cheaper to take a new snapshot and drop events than to keep a huge dump window.
-- Rough bound: on the order of **~3×** recorded process memory (current snapshot + event buffer up to ~k× snapshot), not unbounded growth.
+- Limit is **bytes only**.
+- Threshold = **k × size of the current anchored snapshot** (`memory.size()`).
+- After cut, threshold follows the new snapshot size.
 
 ---
 
 ## Snapshot / event pairing and rotation
 
-- `save` → `save_result` (RPC) **and** `process_save_event { snapshot_uid }` on the monitor FIFO (`SAVE` flag).
-- `save` awaits monitor delivery (backpressure). Target I/O is accordingly stalled while save cannot complete — a second threshold hit during pending save is unlikely; if it happens, queue another `save`.
-- **Cut rule:** install new anchor only when **both** are present for the same `snapshot_uid` (response and event may arrive in either order). Then drop buffered events **before** that `process_save_event`; keep events after it.
-- Until both halves exist, keep the **previous** complete window (required for dump-during-rotation).
+- **Cut rule:** install new anchor only when **both** `save_result` and `process_save_event` share the same `snapshot_uid`. Drop buffered frames **up to and including** that save-event (new window is only I/O after the cut). Until both halves exist, keep the **previous** complete window (dump-during-rotation).
+- Save-event frames are **not** retained in `io_bytes` (avoids inflating the rotate threshold with marker frames).
 
 | State | Meaning |
 |-------|---------|
+| `Starting` | Waiting for first complete anchor |
 | `Idle` | Complete anchor; appending I/O; may rotate on byte threshold |
-| `RotatePending` | New save in flight / partially observed; still append against previous anchor |
+| `RotatePending` | New save in flight / partially observed; append still against previous anchor |
 | `Dumping` | Persist window to debug-store |
+| `Stopping` | Tearing down |
 
-**Dump during `RotatePending`:** dump the **previous** complete snapshot + its events.
+**Dump during `RotatePending`:** dump the **previous** complete snapshot + its `io_bytes`.
 
-**API:**
-
-- `dump` / checkpoint — persist current complete window **without** changing the window.
-- Separate API to **force rotate** (`save` + cut).
-- `dump_and_rotate` — optional convenience; **not needed for v1**.
+**API:** `dump` (no window change), `rotate` (force save + cut). `dump_and_rotate` — **not in v1**.
 
 ---
 
-## Dump triggers
+## Dump → debug-store (write-optimized)
 
-Configurable at start:
+1. `debug_snapshot_event {uid, mana_*}` + trailing = `anchor.memory`
+2. One (or chunked) `debug_io_event` + trailing = **opaque** concatenation of raw monitor frames in `io_bytes` — **no** re-parse/re-encode of Copy/Data/Drain
+3. `debug_session.sync`
+4. Window unchanged (unless a separate `rotate`)
 
-- Dump on **`process_error_event`** (typical post-mortem default).
-- **`process_killed_event` does not** dump by itself.
-- Dump only via **recorder API** (configurable).
-
-### Dump contents
-
-Full window: current anchor snapshot + **all** buffered I/O since that anchor.  
-**No `save` at dump time.**
-
-### After error dump
-
-Target is dead for recording purposes. No new empty window required. Leave monitor/session until **stop recording** so in-flight logs can still be forwarded.
-
-### Persist format → debug-store
-
-Prefer whatever is **simpler to implement and faster to write** (write path ≫ read/replay path for now). Opaque batched `debug_io_event` payloads vs 1:1 kernel message types — choose at implementation time for encoder cost / throughput.
+Seal/fail store only on **`stop_recording`**.
 
 ---
 
 ## Monitor flags (v1)
 
-Subscribe / handle for the replay window:
-
-- `COPY` | `COPY_PAYLOAD` | `DATA` | `DRAIN` | `SAVE` | `ERROR`
-- `MANA` if required for replay fidelity
-
-Do **not** rely on:
-
-- `INITIAL_BUFFER_STATE` / `INITIAL_BUFFER_DATA`
-- `BUFFER_STATE` / `BUFFER_DATA` (viz-only; replay uses save + Copy/Data/Drain)
-
-Exact flags remain a start-recording parameter.
-
----
-
-## Backpressure
-
-- Kernel already blocks pump / awaits `save` delivery when monitor buffers are full.
-- Recorder **may** slow the target by draining slowly — acceptable for debugging.
-- No silent drop of I/O events.
-
----
-
-## debug-store usage
-
-- On start: `begin` → bind session; keep open until **stop recording**.
-- Continuously: forward logs/spans/metrics on the per-target session.
-- On dump: write snapshot + I/O window; `sync`. Do **not** seal/fail the store session on error dump alone — session stays open until stop (late logs).
-- On stop: flush, then `seal` / `fail` as appropriate.
-
----
-
-## Prerequisites before coding recorder
-
-1. **kernel-shield**: `monitor(…, monitor_config)` end-to-end (API, `kernel_rpc` client, spawn auto-monitor defaults).
-2. **kernel-shield**: `save` → full **`save_result`** (not bare `binary`).
-3. Freeze recorder RPC: start / stop / dump / force-rotate; per-target monitor + log sockets.
-4. Multi-target limits (max targets / max window bytes) if needed for safety.
-
----
-
-## Out of scope (for now)
-
-- N previous snapshots (future).
-- `dump_and_rotate` convenience API.
-- Replay tooling / UI.
-- Native (non-WASM) recorder port (same contract later).
+Always: `COPY | COPY_PAYLOAD | DATA | DRAIN | SAVE | ERROR`  
+If `record_mana`: `|= MANA`  
+No `INITIAL_*` / `BUFFER_*`.
 
 ---
 
@@ -221,12 +156,11 @@ Exact flags remain a start-recording parameter.
 
 | Topic | Decision |
 |-------|----------|
-| Threshold | Relative to **last installed** snapshot byte size; updates after each save |
-| I/O event set | COPY(+payload)/DATA/DRAIN (+ SAVE markers; MANA if needed); not whole ENV |
-| Dump encode | Optimize for **write** simplicity/speed into debug-store |
-| Store session lifetime | Until **stop recording** (catch queued logs after error) |
-| Log ingress | **Socket per target** |
+| Threshold | `k ∈ {1,2}` × last installed snapshot byte size |
+| I/O in dump | Opaque raw monitor wire frames |
+| Store session lifetime | Until **stop recording** |
+| Log ingress | Socket per target; forward 1:1 to store |
 | Who monitors | **Recorder** calls `monitor` |
-| INITIAL/BUFFER_* | Ignored; covered by snapshot memory |
 | dump_and_rotate | Not in v1 |
-| Shield monitor_config / save_result | Incomplete vs kernel — fix first |
+| Shield API | Synced: `monitor_config` + `save_result` |
+

@@ -1,0 +1,24 @@
+{
+  "name": "@wa-os/recorder-tests",
+  "version": "0.1.0",
+  "description": "Mocha test suite for recorder WASM module",
+  "type": "module",
+  "scripts": {
+    "test": "tsx ../../node_modules/mocha/bin/mocha.js --timeout 60000 'src/**/*.test.ts'",
+    "test:watch": "tsx ../../node_modules/mocha/bin/mocha.js --watch --timeout 60000 'src/**/*.test.ts'"
+  },
+  "dependencies": {
+    "@wa-os/ts-fs": "0.1.0",
+    "@wa-os/ts-kernel": "0.1.0",
+    "@wa-os/ts-rpc": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/chai": "^4.3.11",
+    "@types/mocha": "^10.0.0",
+    "@types/node": "^22.18.11",
+    "chai": "^4.3.10",
+    "mocha": "^10.2.0",
+    "tsx": "^4.7.0",
+    "typescript": "~5.9.0"
+  }
+}
