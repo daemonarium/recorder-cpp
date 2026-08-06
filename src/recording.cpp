@@ -224,6 +224,8 @@ namespace waos {
     store_session_client_->register_message_type<debug_logs_event>();
     store_session_client_->register_message_type<debug_spans_event>();
     store_session_client_->register_message_type<debug_metrics_event>();
+    store_session_client_->register_message_type<debug_bindings_event>();
+    store_session_client_->register_message_type<debug_registry_event>();
   }
 
   void recording::handle_monitor_data() {
