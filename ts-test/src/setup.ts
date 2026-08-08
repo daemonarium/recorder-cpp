@@ -11,8 +11,11 @@ import {
   CodecRegistry,
   registerDynamicCodecs,
   deserializeTypeRegistry,
+  deserializeTypedJson,
   ensureRpcCodecs,
   ensureRpcTypesInRegistry,
+  LocalCircularBuffer,
+  LocalCircularBufferReader,
   TypeKind,
   TypeRegistry,
   TypeDescription,
@@ -34,6 +37,16 @@ const __dirname = dirname(__filename)
 export const SOCKET_OPTS: SocketOptions = {
   inputBufferSize: 65536,
   outputBufferSize: 65536,
+  flushThreshold: 4096,
+  dataEventThreshold: 0,
+  drainEventThreshold: 4,
+  flags: 0,
+}
+
+/** Large enough for start_recording.code carrying a full mock-module.wasm (~6MiB). */
+export const LARGE_SOCKET_OPTS: SocketOptions = {
+  inputBufferSize: 8 * 1024 * 1024,
+  outputBufferSize: 8 * 1024 * 1024,
   flushThreshold: 4096,
   dataEventThreshold: 0,
   drainEventThreshold: 4,
@@ -335,7 +348,7 @@ export async function setupTestEnvironment(rootDir: string): Promise<TestContext
   client.unbind(shield, 10, 0, Direction.BOTH)
   recorder.bind(shield, 1, 0, Direction.BOTH)
 
-  const userSocket = client.createSocket(0, SOCKET_OPTS)
+  const userSocket = client.createSocket(0, LARGE_SOCKET_OPTS)
   client.bind(recorder, 0, 0, Direction.BOTH)
 
   // Recorder USER client
@@ -461,7 +474,7 @@ export async function setupWasmTargetEnvironment(rootDir: string): Promise<WasmT
   client.unbind(shield, 10, 0, Direction.BOTH)
   recorder.bind(shield, 1, 0, Direction.BOTH)
 
-  const userSocket = client.createSocket(0, SOCKET_OPTS)
+  const userSocket = client.createSocket(0, LARGE_SOCKET_OPTS)
   client.bind(recorder, 0, 0, Direction.BOTH)
 
   const userRegistry = deserializeTypeRegistry(recorder.readRawRpcDescription(0))
@@ -558,6 +571,26 @@ export async function setupWasmTargetEnvironment(rootDir: string): Promise<WasmT
 export function num(v: unknown): number {
   if (typeof v === 'bigint') return Number(v)
   return Number(v)
+}
+
+export function storeSessionRegistry(store: ModuleProcess, storeSocket: number): TypeRegistry {
+  const registry = deserializeTypeRegistry(store.readRawRpcDescription(storeSocket))
+  registry.assignMethodIds()
+  return registry
+}
+
+export function deserializeTypedBytes(
+  registry: TypeRegistry,
+  typeName: string,
+  bytes: Uint8Array
+): Record<string, unknown> {
+  const codecs = new CodecRegistry()
+  registerDynamicCodecs(codecs, registry)
+  ensureRpcCodecs(codecs, registry)
+  const buffer = new LocalCircularBuffer(Math.max(bytes.length + 256, 1024))
+  buffer.write(bytes, bytes.length)
+  const reader = new LocalCircularBufferReader(buffer, codecs)
+  return deserializeTypedJson(reader, registry, typeName) as Record<string, unknown>
 }
 
 export async function tick(ms = 10): Promise<void> {

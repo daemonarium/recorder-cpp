@@ -5,6 +5,8 @@
 #include <socket/socket.h>
 #include <utils/socket_handlers.hpp>
 #include <serialization/rpc.hpp>
+#include <serialization/serialize.hpp>
+#include <serialization/stream_writer.hpp>
 #include <io/circular_buffer.h>
 #include <cstring>
 #include <algorithm>
@@ -38,10 +40,10 @@ namespace waos {
 
     struct socket_options large_socket_options() {
       return socket_options{
-        // Large enough for a full ModuleProcess memory snapshot in one dump frame
-        // (mock-module e2e uses ~1MiB linear memory).
-        .input_buffer_size = 2 * 1024 * 1024,
-        .output_buffer_size = 2 * 1024 * 1024,
+        // Large enough for a full ModuleProcess memory snapshot and chunked code.wasm
+        // (mock-module e2e uses ~1MiB linear memory and ~6MiB WASM).
+        .input_buffer_size = 8 * 1024 * 1024,
+        .output_buffer_size = 8 * 1024 * 1024,
         .flush_threshold = 4096,
         .data_event_threshold = 0,
         .drain_event_threshold = 4,
@@ -49,14 +51,14 @@ namespace waos {
       };
     }
 
-    const char* direction_json(kernel::direction dir) {
-      switch(dir) {
-        case kernel::direction::IN: return "IN";
-        case kernel::direction::OUT: return "OUT";
-        case kernel::direction::BOTH: return "BOTH";
-        case kernel::direction::NONE:
-        default: return "NONE";
-      }
+    template <typename T>
+    std::vector<std::uint8_t> serialize_to_bytes(const T& value) {
+      std::ostringstream oss;
+      serialization::stream_writer writer(oss);
+      serialize(writer, value);
+      writer.write_rest();
+      std::string s = oss.str();
+      return std::vector<std::uint8_t>(s.begin(), s.end());
     }
 
   }
@@ -250,6 +252,7 @@ namespace waos {
     store_session_client_->register_message_type<debug_metrics_event>();
     store_session_client_->register_message_type<debug_bindings_event>();
     store_session_client_->register_message_type<debug_registry_event>();
+    store_session_client_->register_message_type<debug_code_event>();
   }
 
   void recording::handle_monitor_data() {
@@ -400,6 +403,23 @@ namespace waos {
     store_session_client_->channel().commit_send();
   }
 
+  void recording::send_code_payload(const std::vector<std::uint8_t>& bytes) {
+    if(bytes.empty()) {
+      return;
+    }
+    size_t offset = 0;
+    while(offset < bytes.size()) {
+      size_t chunk = std::min(IO_CHUNK_SIZE, bytes.size() - offset);
+      debug_code_event ev{};
+      auto& writer = store_session_client_->channel().begin_send(ev);
+      for(size_t i = 0; i < chunk; ++i) {
+        writer.write_u8(bytes[offset + i]);
+      }
+      store_session_client_->channel().commit_send();
+      offset += chunk;
+    }
+  }
+
   void recording::send_registry_payload(
       std::uint64_t process_id,
       std::uint32_t socket_id,
@@ -466,19 +486,16 @@ namespace waos {
     }
 
     {
-      std::ostringstream json;
-      json << "{\"process_id\":" << target << ",\"bindings\":[";
-      for(size_t i = 0; i < bindings.size(); ++i) {
-        const auto& b = bindings[i];
-        if(i > 0) json << ",";
-        json << "{\"socket\":" << b.socket
-             << ",\"peer_process\":" << b.peer_process
-             << ",\"peer_socket\":" << b.peer_socket
-             << ",\"direction\":\"" << direction_json(b.direction) << "\"}";
-      }
-      json << "]}";
-      std::string body = json.str();
-      send_bindings_payload(std::vector<std::uint8_t>(body.begin(), body.end()));
+      bindings_snapshot snap{
+        .process_id = target,
+        .bindings = bindings,
+      };
+      send_bindings_payload(serialize_to_bytes(snap));
+    }
+
+    if(!request_.code.empty()) {
+      send_code_payload(request_.code);
+      request_.code.clear();
     }
 
     // Target socket 0: empty placeholder avoids ModuleProcess rpc_description hangs.

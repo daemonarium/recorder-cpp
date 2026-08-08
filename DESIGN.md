@@ -149,10 +149,11 @@ Seal/fail store only on **`stop_recording`**.
 
 After the **first complete save anchor** in `start_recording`:
 
-1. `list_socket_bindings(target)` via shield → `debug_bindings_event` + JSON payload (`bindings.json`: `process_id`, `bindings[]` with string `direction`)
-2. `registry.<target>.0.bin` written as empty placeholder (avoids hanging `rpc_description` on ModuleProcess targets)
-3. For each peer `(peer_process, peer_socket)` (and other local sockets ≠ 0): `get_rpc_description` → `debug_registry_event` (empty on soft-fail / unregistered)
-4. `debug_session.sync` so files are durable before start returns
+1. `list_socket_bindings(target)` via shield → `debug_bindings_event` + serialized `bindings_snapshot` (`bindings.bin`)
+2. If `start_recording_request.code` is non-empty → `debug_code_event` + bytes → `code.wasm`, then clear the in-RAM copy
+3. `registry.<target>.0.bin` written as empty placeholder (avoids hanging `rpc_description` on ModuleProcess targets)
+4. For each peer `(peer_process, peer_socket)` (and other local sockets ≠ 0): `get_rpc_description` → `debug_registry_event` (empty on soft-fail / unregistered)
+5. `debug_session.sync` so files are durable before start returns
 
 Mid-session:
 

@@ -1,6 +1,10 @@
 import { expect } from 'chai'
 import fsp from 'node:fs/promises'
-import { join } from 'node:path'
+import { readFile, access } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 import { LocalProcess, Direction } from '@wa-os/ts-kernel'
 import { SocketRpcClient, CodecRegistry, registerDynamicCodecs, ensureRpcCodecs, deserializeTypeRegistry } from '@wa-os/ts-rpc'
 import {
@@ -12,7 +16,35 @@ import {
   TARGET_ID,
   CLIENT_ID,
   SOCKET_OPTS,
+  storeSessionRegistry,
+  deserializeTypedBytes,
 } from './setup.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+
+const MOCK_MODULE_WASM = join(
+  __dirname,
+  '../../../cmake-build-emscripten/kernel-shield/cpp-test/mock-module.wasm'
+)
+
+const WAOSREC_BIN_CANDIDATES = [
+  join(__dirname, '../../../build/waosrec'),
+  join(__dirname, '../../../cmake-build-debug/waosrec'),
+  join(__dirname, '../../../cmake-build/waosrec'),
+]
+
+async function resolveWaosrecBin(): Promise<string | null> {
+  for (const p of WAOSREC_BIN_CANDIDATES) {
+    try {
+      await access(p, fsConstants.X_OK)
+      return p
+    } catch {
+      /* try next */
+    }
+  }
+  return null
+}
 
 async function registerWithShield(
   ctx: {
@@ -51,6 +83,7 @@ describe('recorder WASM e2e (real mock-module target)', () => {
       const ctx = await setupWasmTargetEnvironment(root)
       try {
         const sessionName = 'e2e-mock-echo'
+        const moduleCode = await readFile(MOCK_MODULE_WASM)
         const result = await ctx.userClient.call(ctx.methodId('start_recording'), {
           target_process: BigInt(TARGET_ID),
           store_process: BigInt(STORE_ID),
@@ -61,6 +94,7 @@ describe('recorder WASM e2e (real mock-module target)', () => {
             record_mana: false,
             dump_on_error: true,
           },
+          code: moduleCode,
         }) as Record<string, unknown>
 
         await tick(20)
@@ -88,21 +122,33 @@ describe('recorder WASM e2e (real mock-module target)', () => {
 
         const sessionId = num(result.store_session_id)
         const dir = join(root, 'sessions', String(sessionId))
-        const meta = JSON.parse(await fsp.readFile(join(dir, 'meta.json'), 'utf8'))
+        const sessionReg = storeSessionRegistry(ctx.store, num(result.store_socket))
+        const meta = deserializeTypedBytes(
+          sessionReg,
+          'session_meta',
+          await fsp.readFile(join(dir, 'meta.bin'))
+        )
         expect(meta.name).to.equal(sessionName)
         expect(meta.status).to.equal('open')
-        expect(meta.process_id).to.equal(TARGET_ID)
+        expect(num(meta.process_id)).to.equal(TARGET_ID)
 
         await tick(100)
 
-        const bindings = JSON.parse(
-          await fsp.readFile(join(dir, 'bindings.json'), 'utf8')
+        const bindings = deserializeTypedBytes(
+          sessionReg,
+          'bindings_snapshot',
+          await fsp.readFile(join(dir, 'bindings.bin'))
         )
-        expect(bindings.process_id).to.equal(TARGET_ID)
+        expect(num(bindings.process_id)).to.equal(TARGET_ID)
         expect(bindings.bindings).to.be.an('array')
         await fsp.access(join(dir, `registry.${TARGET_ID}.0.bin`))
 
-        const snaps = (await fsp.readdir(dir)).filter((f) => f.startsWith('snap.') && f.endsWith('.bin'))
+        const codeOnDisk = await fsp.readFile(join(dir, 'code.wasm'))
+        expect(Buffer.from(codeOnDisk).equals(Buffer.from(moduleCode))).to.equal(true)
+
+        const snaps = (await fsp.readdir(dir)).filter(
+          (f) => f.startsWith('snap.') && f.endsWith('.bin') && !f.includes('.meta.')
+        )
         expect(snaps.length).to.be.greaterThan(0)
         const snapName = snaps[0]
         const uidMatch = /^snap\.(\d+)\.bin$/.exec(snapName)
@@ -112,8 +158,10 @@ describe('recorder WASM e2e (real mock-module target)', () => {
         const snapBytes = await fsp.readFile(join(dir, snapName))
         expect(Buffer.from(snapBytes).equals(Buffer.from(anchorMemory))).to.equal(true)
 
-        const snapMeta = JSON.parse(
-          await fsp.readFile(join(dir, `snap.${snapUid}.meta.json`), 'utf8')
+        const snapMeta = deserializeTypedBytes(
+          sessionReg,
+          'snapshot_meta',
+          await fsp.readFile(join(dir, `snap.${snapUid}.meta.bin`))
         )
         expect(num(snapMeta.snapshot_uid)).to.equal(Number(snapUid))
         expect(num(snapMeta.memory_size)).to.equal(anchorMemory.length)
@@ -126,6 +174,17 @@ describe('recorder WASM e2e (real mock-module target)', () => {
         expect(ctx.target.isAlive).to.equal(false)
         expect(ctx.recorder.isAlive).to.equal(true)
         expect(ctx.store.isAlive).to.equal(true)
+
+        const waosrec = await resolveWaosrecBin()
+        expect(waosrec, 'native waosrec binary (build with NOT WASM)').to.be.a('string')
+        const outPath = join(root, 'session.waosrec')
+        const pack = spawnSync(waosrec!, ['pack', dir, '-o', outPath], { encoding: 'utf8' })
+        expect(pack.status, pack.stderr).to.equal(0)
+        const info = spawnSync(waosrec!, ['info', outPath], { encoding: 'utf8' })
+        expect(info.status, info.stderr).to.equal(0)
+        expect(info.stdout).to.match(new RegExp(`code_bytes=${moduleCode.length}`))
+        expect(info.stdout).to.match(/memory_bytes=\d+/)
+        expect(info.stdout).to.match(/events_bytes=\d+/)
       } finally {
         await ctx.cleanup()
       }
@@ -146,6 +205,7 @@ describe('recorder WASM e2e (real mock-module target)', () => {
             record_mana: false,
             dump_on_error: false,
           },
+          code: new Uint8Array(),
         }) as Record<string, unknown>
 
         await tick(20)

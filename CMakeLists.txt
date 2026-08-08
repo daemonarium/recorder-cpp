@@ -5,16 +5,18 @@ set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories(src)
-aux_source_directory(src SRC_FILES)
 
 set(WASM_FILES ${CMAKE_SOURCE_DIR}/cpp-rpc/src/utils/socket_handlers.cpp)
 aux_source_directory(${CMAKE_SOURCE_DIR}/cpp-rpc/src/io IO_FILES)
 aux_source_directory(${CMAKE_SOURCE_DIR}/cpp-rpc/src/socket SOCKET_FILES)
 
+file(GLOB RECORDER_SRC_ALL CONFIGURE_DEPENDS src/*.cpp)
+list(FILTER RECORDER_SRC_ALL EXCLUDE REGEX ".*/waosrec(_main|_ut)?\\.cpp$")
+
 set(EXECUTABLE_NAME recorder-wasm)
 
 if(WASM)
-  add_executable(${EXECUTABLE_NAME} ${SRC_FILES} ${WASM_FILES} ${IO_FILES} ${SOCKET_FILES})
+  add_executable(${EXECUTABLE_NAME} ${RECORDER_SRC_ALL} ${WASM_FILES} ${IO_FILES} ${SOCKET_FILES})
   target_compile_options(${EXECUTABLE_NAME} PRIVATE
     -fwasm-exceptions
   )
@@ -45,5 +47,32 @@ if(WASM)
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     OUTPUT_NAME recorder
     SUFFIX ".wasm"
+  )
+endif()
+
+if(NOT WASM)
+  add_executable(waosrec
+    src/waosrec.cpp
+    src/waosrec_main.cpp
+  )
+  target_include_directories(waosrec PRIVATE
+    src
+    ${CMAKE_SOURCE_DIR}/cpp-rpc/src
+  )
+  set_target_properties(waosrec PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+  )
+
+  add_executable(waosrec_ut
+    src/waosrec.cpp
+    src/waosrec_ut.cpp
+  )
+  target_include_directories(waosrec_ut PRIVATE
+    src
+    ${CMAKE_SOURCE_DIR}/cpp-rpc/src
+  )
+  target_link_libraries(waosrec_ut PRIVATE Boost::ut)
+  set_target_properties(waosrec_ut PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests
   )
 endif()

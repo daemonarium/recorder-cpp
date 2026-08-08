@@ -17,6 +17,8 @@ import {
   CLIENT_ID,
   SOCKET_OPTS,
   monitor_flag,
+  storeSessionRegistry,
+  deserializeTypedBytes,
 } from './setup.js'
 
 async function registerWithShield(
@@ -51,6 +53,35 @@ async function registerWithShield(
 }
 
 describe('recorder WASM', () => {
+  it('start with code writes code.wasm', async () => {
+    await withTempRoot(async (root) => {
+      const ctx = await setupTestEnvironment(root)
+      try {
+        const code = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0xaa, 0xbb])
+        const result = await ctx.userClient.call(ctx.methodId('start_recording'), {
+          target_process: BigInt(TARGET_ID),
+          store_process: BigInt(STORE_ID),
+          session_name: 'with-code',
+          labels: {},
+          config: {
+            event_buffer_snapshot_mult: 1,
+            record_mana: false,
+            dump_on_error: false,
+          },
+          code,
+        }) as Record<string, unknown>
+
+        await tick(80)
+        const sessionId = num(result.store_session_id)
+        const onDisk = await fsp.readFile(join(root, 'sessions', String(sessionId), 'code.wasm'))
+        expect(Buffer.from(onDisk).equals(Buffer.from(code))).to.equal(true)
+        await ctx.userClient.call(ctx.methodId('stop_recording'), result.recording_id)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+  })
+
   it('rejects invalid event_buffer_snapshot_mult', async () => {
     await withTempRoot(async (root) => {
       const ctx = await setupTestEnvironment(root)
@@ -67,6 +98,7 @@ describe('recorder WASM', () => {
               record_mana: false,
               dump_on_error: true,
             },
+            code: new Uint8Array(),
           })
         } catch (e) {
           err = e
@@ -94,6 +126,7 @@ describe('recorder WASM', () => {
             record_mana: false,
             dump_on_error: true,
           },
+          code: new Uint8Array(),
         }) as Record<string, unknown>
 
         expect(num(result.recording_id)).to.equal(1)
@@ -103,12 +136,15 @@ describe('recorder WASM', () => {
 
         await tick(80)
 
-        const meta = JSON.parse(
-          await fsp.readFile(join(root, 'sessions', '1', 'meta.json'), 'utf8')
+        const sessionReg = storeSessionRegistry(ctx.store, num(result.store_socket))
+        const meta = deserializeTypedBytes(
+          sessionReg,
+          'session_meta',
+          await fsp.readFile(join(root, 'sessions', '1', 'meta.bin'))
         )
         expect(meta.name).to.equal('start-ok')
         expect(meta.status).to.equal('open')
-        expect(meta.process_id).to.equal(TARGET_ID)
+        expect(num(meta.process_id)).to.equal(TARGET_ID)
 
         const saveCalls = ctx.kernelCalls.filter((c) => c.method === 'kernel.save')
         expect(saveCalls.length).to.be.greaterThan(0)
@@ -123,10 +159,12 @@ describe('recorder WASM', () => {
         expect(flags & monitor_flag.BIND).to.not.equal(0)
         expect(flags & monitor_flag.MANA).to.equal(0)
 
-        const bindings = JSON.parse(
-          await fsp.readFile(join(root, 'sessions', '1', 'bindings.json'), 'utf8')
+        const bindings = deserializeTypedBytes(
+          sessionReg,
+          'bindings_snapshot',
+          await fsp.readFile(join(root, 'sessions', '1', 'bindings.bin'))
         )
-        expect(bindings.process_id).to.equal(TARGET_ID)
+        expect(num(bindings.process_id)).to.equal(TARGET_ID)
         expect(bindings.bindings).to.be.an('array')
 
         const registryPath = join(root, 'sessions', '1', `registry.${TARGET_ID}.0.bin`)
@@ -137,8 +175,10 @@ describe('recorder WASM', () => {
         expect(listCalls.length).to.be.greaterThan(0)
 
         await ctx.userClient.call(ctx.methodId('stop_recording'), result.recording_id)
-        const metaAfterStop = JSON.parse(
-          await fsp.readFile(join(root, 'sessions', '1', 'meta.json'), 'utf8')
+        const metaAfterStop = deserializeTypedBytes(
+          sessionReg,
+          'session_meta',
+          await fsp.readFile(join(root, 'sessions', '1', 'meta.bin'))
         )
         expect(metaAfterStop.name).to.equal('start-ok')
         expect(metaAfterStop.status).to.equal('open')
@@ -187,17 +227,21 @@ describe('recorder WASM', () => {
             record_mana: false,
             dump_on_error: false,
           },
+          code: new Uint8Array(),
         }) as Record<string, unknown>
 
         await tick(100)
 
         const sessionId = num(result.store_session_id)
-        const bindings = JSON.parse(
-          await fsp.readFile(join(root, 'sessions', String(sessionId), 'bindings.json'), 'utf8')
+        const sessionReg = storeSessionRegistry(ctx.store, num(result.store_socket))
+        const bindings = deserializeTypedBytes(
+          sessionReg,
+          'bindings_snapshot',
+          await fsp.readFile(join(root, 'sessions', String(sessionId), 'bindings.bin'))
         )
-        expect(bindings.bindings.length).to.be.greaterThan(0)
-        expect(bindings.bindings[0].peer_process).to.equal(peerId)
-        expect(bindings.bindings[0].direction).to.equal('BOTH')
+        expect((bindings.bindings as unknown[]).length).to.be.greaterThan(0)
+        expect(num((bindings.bindings as any[])[0].peer_process)).to.equal(peerId)
+        expect(num((bindings.bindings as any[])[0].direction)).to.equal(3)
 
         const peerRegistry = join(root, 'sessions', String(sessionId), `registry.${peerId}.0.bin`)
         await fsp.access(peerRegistry)
@@ -233,6 +277,7 @@ describe('recorder WASM', () => {
             record_mana: false,
             dump_on_error: false,
           },
+          code: new Uint8Array(),
         }) as Record<string, unknown>
 
         await tick(20)
@@ -271,6 +316,7 @@ describe('recorder WASM', () => {
             record_mana: false,
             dump_on_error: true,
           },
+          code: new Uint8Array(),
         }) as Record<string, unknown>
 
         await tick(20)
@@ -316,6 +362,7 @@ describe('recorder WASM', () => {
             record_mana: false,
             dump_on_error: false,
           },
+          code: new Uint8Array(),
         }) as Record<string, unknown>
 
         await tick(20)
@@ -359,6 +406,7 @@ describe('recorder WASM', () => {
             record_mana: false,
             dump_on_error: true,
           },
+          code: new Uint8Array(),
         }) as Record<string, unknown>
 
         await tick(20)
@@ -369,14 +417,23 @@ describe('recorder WASM', () => {
 
         const sessionId = num(result.store_session_id)
         const dir = join(root, 'sessions', String(sessionId))
-        const meta = JSON.parse(await fsp.readFile(join(dir, 'meta.json'), 'utf8'))
+        const sessionReg = storeSessionRegistry(ctx.store, num(result.store_socket))
+        const meta = deserializeTypedBytes(
+          sessionReg,
+          'session_meta',
+          await fsp.readFile(join(dir, 'meta.bin'))
+        )
         expect(meta.status).to.equal('open')
 
-        const snaps = (await fsp.readdir(dir)).filter((f) => f.startsWith('snap.') && f.endsWith('.bin'))
+        const snaps = (await fsp.readdir(dir)).filter((f) => f.startsWith('snap.') && f.endsWith('.bin') && !f.includes('.meta.'))
         expect(snaps.length).to.be.greaterThan(0)
 
         await ctx.userClient.call(ctx.methodId('stop_recording'), result.recording_id)
-        const metaAfter = JSON.parse(await fsp.readFile(join(dir, 'meta.json'), 'utf8'))
+        const metaAfter = deserializeTypedBytes(
+          sessionReg,
+          'session_meta',
+          await fsp.readFile(join(dir, 'meta.bin'))
+        )
         expect(metaAfter.status).to.equal('open')
       } finally {
         await ctx.cleanup()
@@ -398,6 +455,7 @@ describe('recorder WASM', () => {
             record_mana: false,
             dump_on_error: false,
           },
+          code: new Uint8Array(),
         }) as Record<string, unknown>
 
         await tick(20)

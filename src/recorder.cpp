@@ -59,8 +59,9 @@ extern "C" void start() {
   waos::shield_client::start();
 
   struct socket_options socket_options = {
-    .input_buffer_size = 65536,
-    .output_buffer_size = 65536,
+    // Large enough for start_recording.code (full module WASM) in one RPC frame.
+    .input_buffer_size = 8 * 1024 * 1024,
+    .output_buffer_size = 8 * 1024 * 1024,
     .flush_threshold = 4096,
     .data_event_threshold = 0,
     .drain_event_threshold = 4,

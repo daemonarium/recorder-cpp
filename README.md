@@ -14,6 +14,15 @@ cmake --build cmake-build-emscripten --target recorder-wasm
 # outputs cmake-build-emscripten/recorder.wasm
 ```
 
+Native packer CLI (non-WASM build):
+
+```bash
+cmake -S . -B build
+cmake --build build --target waosrec
+# waosrec pack <session-dir> -o out.waosrec
+# waosrec info out.waosrec
+```
+
 Requires [`kernel-shield`](../kernel-shield/) and [`debug-store`](../debug-store/) for the intended topology.
 
 ## Topology
@@ -24,7 +33,7 @@ Requires [`kernel-shield`](../kernel-shield/) and [`debug-store`](../debug-store
 | 1 | SHIELD — outbound to kernel-shield USER |
 | ≥2 | per-target monitor, log ingress, store USER (temp), store session |
 
-Host must bind `recorder.1 ↔ kernel-shield.0` before use. On `start_recording`, the module binds to debug-store via `shield.bind`, calls `begin`, then monitors/saves the target through shield.
+Host must bind `recorder.1 ↔ kernel-shield.0` before use. On `start_recording`, the module binds to debug-store via `shield.bind`, calls `begin`, then monitors/saves the target through shield. Pass target WASM bytes in `start_recording.code` (empty OK for LocalProcess); recorder dumps them to store as `code.wasm` and clears the session copy.
 
 `g_own_process_id` defaults to `3` (must match the recorder pid in the kernel).
 
@@ -33,17 +42,20 @@ Host must bind `recorder.1 ↔ kernel-shield.0` before use. On `start_recording`
 ```bash
 # build required WASMs first (mock-module = e2e echo target)
 cmake --build cmake-build-emscripten --target mock-module recorder-wasm kernel-shield debug-store
+cmake --build build --target waosrec   # for e2e pack round-trip
 npm install
 npm test -w @wa-os/recorder-tests
 ```
 
 Harness: Kernel + kernel-shield + mock kernel RPC + debug-store + ts-fs + recorder.
 
-- Synthetic scenarios (`recorder.test.ts`): invalid `k`, start, dump, rotate, dump-on-error, `record_mana=false` (LocalProcess stub + injected monitor frames).
-- E2E (`recorder.e2e.test.ts`): real [`mock-module.wasm`](../kernel-shield/cpp-test/src/mock_module.cpp) echo traffic → `kernel.kill(..., error)` → assert `sessions/<id>/{meta.json,snap.*.bin,snap.*.meta.json,io.bin}` on disk (no replay).
+- Synthetic scenarios (`recorder.test.ts`): invalid `k`, start, code dump, dump, rotate, dump-on-error, `record_mana=false` (LocalProcess stub + injected monitor frames).
+- E2E (`recorder.e2e.test.ts`): real [`mock-module.wasm`](../kernel-shield/cpp-test/src/mock_module.cpp) bytes in `start_recording.code` → echo traffic → `kernel.kill(..., error)` → assert `sessions/<id>/{meta.bin,code.wasm,bindings.bin,snap.*.bin,snap.*.meta.bin,io.bin}` and `waosrec pack` round-trip.
 
 ## RPC contract
 
 Types: [`cpp-rpc/src/examples/structures/recorder.hpp`](../cpp-rpc/src/examples/structures/recorder.hpp)
 
 `record_config.event_buffer_snapshot_mult` must be `1` or `2`.
+
+`.waosrec` format: [`src/waosrec.hpp`](./src/waosrec.hpp).

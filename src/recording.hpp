@@ -94,6 +94,7 @@ namespace waos {
       std::shared_ptr<serialization::promise<void>> dump_window();
       std::shared_ptr<serialization::promise<void>> send_io_blob(const std::vector<std::uint8_t>& bytes);
       void send_bindings_payload(const std::vector<std::uint8_t>& bytes);
+      void send_code_payload(const std::vector<std::uint8_t>& bytes);
       void send_registry_payload(std::uint64_t process_id, std::uint32_t socket_id, const std::vector<std::uint8_t>& bytes);
       std::shared_ptr<serialization::promise<void>> capture_initial_topology();
       void queue_registry_refresh(std::uint64_t process_id, std::uint32_t socket_id);
