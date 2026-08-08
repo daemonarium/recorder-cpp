@@ -103,6 +103,7 @@ state:   Starting | Idle | RotatePending | Dumping | Stopping
 ### Appended to `io_bytes` (raw frames)
 
 - `COPY` (+ payload when `COPY_PAYLOAD`), `DATA`, `DRAIN`
+- `BIND` / `UNBIND` (`process_bind_event` / `process_unbind_event`) — count toward rotate threshold
 - `MANA` frames iff `record_mana`
 - Not: `SAVE` (cut marker only), `INITIAL_*`, `BUFFER_*`, `KILLED` (no dump), bare `ERROR` (trigger only)
 
@@ -144,9 +145,25 @@ Seal/fail store only on **`stop_recording`**.
 
 ---
 
+## Topology capture
+
+After the **first complete save anchor** in `start_recording`:
+
+1. `list_socket_bindings(target)` via shield → `debug_bindings_event` + JSON payload (`bindings.json`: `process_id`, `bindings[]` with string `direction`)
+2. `registry.<target>.0.bin` written as empty placeholder (avoids hanging `rpc_description` on ModuleProcess targets)
+3. For each peer `(peer_process, peer_socket)` (and other local sockets ≠ 0): `get_rpc_description` → `debug_registry_event` (empty on soft-fail / unregistered)
+4. `debug_session.sync` so files are durable before start returns
+
+Mid-session:
+
+- `process_bind_event` / `process_unbind_event`: append opaque frame to `io_bytes_` (rotate-eligible)
+- On **bind**: queue `get_rpc_description(peer, peer_sock)` after monitor `handle_data` (must not nest shield RPCs) → `debug_registry_event`. Unbind does not delete registry files.
+
+---
+
 ## Monitor flags (v1)
 
-Always: `COPY | COPY_PAYLOAD | DATA | DRAIN | SAVE | ERROR`  
+Always: `COPY | COPY_PAYLOAD | DATA | DRAIN | SAVE | ERROR | BIND`  
 If `record_mana`: `|= MANA`  
 No `INITIAL_*` / `BUFFER_*`.
 
@@ -163,4 +180,5 @@ No `INITIAL_*` / `BUFFER_*`.
 | Who monitors | **Recorder** calls `monitor` |
 | dump_and_rotate | Not in v1 |
 | Shield API | Synced: `monitor_config` + `save_result` |
+| Topology | After first anchor: bindings + registries to store; BIND frames opaque; mid-session bind refreshes peer registry |
 

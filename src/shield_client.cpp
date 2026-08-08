@@ -24,6 +24,8 @@ namespace waos {
 
       rpc_client = std::make_shared<rpc_client_type>(socket_id);
       rpc_client->register_basic_types();
+      // Match shield server exception registration so rpc_error payloads deserialize.
+      rpc_client->channel().register_exception_type<std::runtime_error>();
       // save_result and monitor_config are plain objects; serialization uses reflection.
       shield_rpc_client = std::make_shared<shield_rpc<rpc_client_type*>>(rpc_client.get());
 

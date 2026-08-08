@@ -8,6 +8,8 @@
 #include <io/circular_buffer.h>
 #include <cstring>
 #include <algorithm>
+#include <set>
+#include <sstream>
 
 #ifdef __EMSCRIPTEN__
 extern "C" {
@@ -45,6 +47,16 @@ namespace waos {
         .drain_event_threshold = 4,
         .flags = 0,
       };
+    }
+
+    const char* direction_json(kernel::direction dir) {
+      switch(dir) {
+        case kernel::direction::IN: return "IN";
+        case kernel::direction::OUT: return "OUT";
+        case kernel::direction::BOTH: return "BOTH";
+        case kernel::direction::NONE:
+        default: return "NONE";
+      }
     }
 
   }
@@ -96,7 +108,8 @@ namespace waos {
       | static_cast<std::uint32_t>(monitor_flag::DATA)
       | static_cast<std::uint32_t>(monitor_flag::DRAIN)
       | static_cast<std::uint32_t>(monitor_flag::SAVE)
-      | static_cast<std::uint32_t>(monitor_flag::ERROR);
+      | static_cast<std::uint32_t>(monitor_flag::ERROR)
+      | static_cast<std::uint32_t>(monitor_flag::BIND);
     if(request_.config.record_mana) {
       flags |= static_cast<std::uint32_t>(monitor_flag::MANA);
     }
@@ -147,6 +160,8 @@ namespace waos {
     monitor_channel_->register_message_type<process_socket_state_event>();
     monitor_channel_->register_message_type<process_measure_mana_event>();
     monitor_channel_->register_message_type<process_set_mana_limit_event>();
+    monitor_channel_->register_message_type<process_bind_event>();
+    monitor_channel_->register_message_type<process_unbind_event>();
 
     auto self = shared_from_this();
 
@@ -178,6 +193,15 @@ namespace waos {
     });
     monitor_channel_->on_message<process_set_mana_limit_event>([self](process_set_mana_limit_event&, size_t payload_size) {
       if(!self->request_.config.record_mana) return;
+      size_t msg_len = self->monitor_channel_->reader().read_offset_ + payload_size;
+      self->on_io_frame(self->capture_current_frame(msg_len));
+    });
+    monitor_channel_->on_message<process_bind_event>([self](process_bind_event& ev, size_t payload_size) {
+      size_t msg_len = self->monitor_channel_->reader().read_offset_ + payload_size;
+      self->on_io_frame(self->capture_current_frame(msg_len));
+      self->queue_registry_refresh(ev.peer_process, static_cast<std::uint32_t>(ev.peer_socket));
+    });
+    monitor_channel_->on_message<process_unbind_event>([self](process_unbind_event&, size_t payload_size) {
       size_t msg_len = self->monitor_channel_->reader().read_offset_ + payload_size;
       self->on_io_frame(self->capture_current_frame(msg_len));
     });
@@ -232,6 +256,7 @@ namespace waos {
     if(monitor_channel_) {
       monitor_channel_->handle_data();
     }
+    flush_registry_refresh_queue();
   }
 
   void recording::handle_log_data() {
@@ -364,6 +389,123 @@ namespace waos {
       offset += chunk;
     }
     return serialization::promise<void>::resolved();
+  }
+
+  void recording::send_bindings_payload(const std::vector<std::uint8_t>& bytes) {
+    debug_bindings_event ev{};
+    auto& writer = store_session_client_->channel().begin_send(ev);
+    for(std::uint8_t b : bytes) {
+      writer.write_u8(b);
+    }
+    store_session_client_->channel().commit_send();
+  }
+
+  void recording::send_registry_payload(
+      std::uint64_t process_id,
+      std::uint32_t socket_id,
+      const std::vector<std::uint8_t>& bytes
+  ) {
+    debug_registry_event ev{
+      .process_id = process_id,
+      .socket_id = socket_id,
+    };
+    auto& writer = store_session_client_->channel().begin_send(ev);
+    for(std::uint8_t b : bytes) {
+      writer.write_u8(b);
+    }
+    store_session_client_->channel().commit_send();
+  }
+
+  void recording::queue_registry_refresh(std::uint64_t process_id, std::uint32_t socket_id) {
+    pending_registry_refresh_.emplace_back(process_id, socket_id);
+  }
+
+  void recording::flush_registry_refresh_queue() {
+    if(pending_registry_refresh_.empty()) return;
+    auto pending = std::move(pending_registry_refresh_);
+    pending_registry_refresh_.clear();
+    for(const auto& [pid, sock] : pending) {
+      refresh_peer_registry(pid, sock);
+    }
+  }
+
+  std::shared_ptr<serialization::promise<void>> recording::refresh_peer_registry(
+      std::uint64_t process_id,
+      std::uint32_t socket_id
+  ) {
+    if(!store_session_client_ || state_ == recording_state::Stopping) {
+      co_return;
+    }
+    // Must not nest shield RPCs inside another shield response handler — queue from
+    // bind events and flush after monitor handle_data, or co_await from coroutines.
+    auto self = shared_from_this();
+    try {
+      auto bytes = co_await shield_client::shield_rpc_client->get_rpc_description(process_id, socket_id);
+      if(self->store_session_client_ && self->state_ != recording_state::Stopping) {
+        self->send_registry_payload(process_id, socket_id, bytes);
+      }
+    } catch(...) {
+      if(self->store_session_client_ && self->state_ != recording_state::Stopping) {
+        self->send_registry_payload(process_id, socket_id, {});
+      }
+    }
+    co_return;
+  }
+
+  std::shared_ptr<serialization::promise<void>> recording::capture_initial_topology() {
+    if(!store_session_client_) {
+      co_return;
+    }
+
+    auto target = request_.target_process;
+    std::vector<kernel::socket_binding> bindings;
+    try {
+      bindings = co_await shield_client::shield_rpc_client->list_socket_bindings(target);
+    } catch(...) {
+      bindings.clear();
+    }
+
+    {
+      std::ostringstream json;
+      json << "{\"process_id\":" << target << ",\"bindings\":[";
+      for(size_t i = 0; i < bindings.size(); ++i) {
+        const auto& b = bindings[i];
+        if(i > 0) json << ",";
+        json << "{\"socket\":" << b.socket
+             << ",\"peer_process\":" << b.peer_process
+             << ",\"peer_socket\":" << b.peer_socket
+             << ",\"direction\":\"" << direction_json(b.direction) << "\"}";
+      }
+      json << "]}";
+      std::string body = json.str();
+      send_bindings_payload(std::vector<std::uint8_t>(body.begin(), body.end()));
+    }
+
+    // Target socket 0: empty placeholder avoids ModuleProcess rpc_description hangs.
+    send_registry_payload(target, 0, {});
+
+    std::set<std::pair<std::uint64_t, std::uint32_t>> keys;
+    for(const auto& b : bindings) {
+      keys.emplace(target, static_cast<std::uint32_t>(b.socket));
+      keys.emplace(b.peer_process, static_cast<std::uint32_t>(b.peer_socket));
+    }
+    keys.erase({target, 0});
+
+    for(const auto& [pid, sock] : keys) {
+      if(pid == target) {
+        send_registry_payload(pid, sock, {});
+        continue;
+      }
+      std::vector<std::uint8_t> bytes;
+      try {
+        bytes = co_await shield_client::shield_rpc_client->get_rpc_description(pid, sock);
+      } catch(...) {
+        bytes.clear();
+      }
+      send_registry_payload(pid, sock, bytes);
+    }
+
+    co_return;
   }
 
   std::shared_ptr<serialization::promise<void>> recording::dump_window() {
@@ -521,6 +663,10 @@ namespace waos {
     } else {
       start_promise_.reset();
     }
+
+    co_await capture_initial_topology();
+    store_session_rpc<serialization::socket_rpc_client*> session_rpc(store_session_client_.get());
+    co_await session_rpc.sync();
     co_return;
   }
 

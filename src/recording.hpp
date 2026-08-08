@@ -93,10 +93,18 @@ namespace waos {
       void maybe_request_rotate();
       std::shared_ptr<serialization::promise<void>> dump_window();
       std::shared_ptr<serialization::promise<void>> send_io_blob(const std::vector<std::uint8_t>& bytes);
+      void send_bindings_payload(const std::vector<std::uint8_t>& bytes);
+      void send_registry_payload(std::uint64_t process_id, std::uint32_t socket_id, const std::vector<std::uint8_t>& bytes);
+      std::shared_ptr<serialization::promise<void>> capture_initial_topology();
+      void queue_registry_refresh(std::uint64_t process_id, std::uint32_t socket_id);
+      void flush_registry_refresh_queue();
+      std::shared_ptr<serialization::promise<void>> refresh_peer_registry(std::uint64_t process_id, std::uint32_t socket_id);
       void on_save_event(std::uint64_t snapshot_uid, std::vector<std::uint8_t> frame);
       void on_error_event();
       void on_io_frame(std::vector<std::uint8_t> frame);
       void forward_log_frame(std::vector<std::uint8_t> frame);
+
+      std::vector<std::pair<std::uint64_t, std::uint32_t>> pending_registry_refresh_;
   };
 
   std::shared_ptr<recording> get_recording(std::uint64_t recording_id);

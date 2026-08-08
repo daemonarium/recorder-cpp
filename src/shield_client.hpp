@@ -10,6 +10,8 @@
 namespace waos {
 
   // Method IDs match kernel_shield API declaration order.
+  // list_socket_bindings must use kernel::socket_binding (same layout the shield serializes);
+  // a hand-rolled uint32/uint64 row type throws on non-empty responses under wasm-exceptions.
   template <typename rpc_client_ptr_type>
   class shield_rpc {
     public:
@@ -49,6 +51,16 @@ namespace waos {
       std::shared_ptr<serialization::promise<void>> demonitor(
           std::uint64_t target, std::uint64_t monitor, std::uint64_t monitor_socket) {
         return rpc_client_->template call<void>(11, target, monitor, monitor_socket);
+      }
+
+      std::shared_ptr<serialization::promise<std::vector<kernel::socket_binding>>> list_socket_bindings(
+          std::uint64_t id) {
+        return rpc_client_->template call<std::vector<kernel::socket_binding>>(14, id);
+      }
+
+      std::shared_ptr<serialization::promise<std::vector<std::uint8_t>>> get_rpc_description(
+          std::uint64_t id, std::uint64_t socket) {
+        return rpc_client_->template call<std::vector<std::uint8_t>>(15, id, socket);
       }
 
     private:

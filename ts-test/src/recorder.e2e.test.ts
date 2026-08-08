@@ -1,6 +1,8 @@
 import { expect } from 'chai'
 import fsp from 'node:fs/promises'
 import { join } from 'node:path'
+import { LocalProcess, Direction } from '@wa-os/ts-kernel'
+import { SocketRpcClient, CodecRegistry, registerDynamicCodecs, ensureRpcCodecs, deserializeTypeRegistry } from '@wa-os/ts-rpc'
 import {
   setupWasmTargetEnvironment,
   withTempRoot,
@@ -8,7 +10,40 @@ import {
   tick,
   STORE_ID,
   TARGET_ID,
+  CLIENT_ID,
+  SOCKET_OPTS,
 } from './setup.js'
+
+async function registerWithShield(
+  ctx: {
+    client: LocalProcess
+    shield: import('@wa-os/ts-kernel').ModuleProcess
+    recorder: import('@wa-os/ts-kernel').ModuleProcess
+  },
+  processId: number
+): Promise<void> {
+  // Recorder owns shield USER (recorder:1 ↔ shield:0). Temporarily release it.
+  ctx.recorder.unbind(ctx.shield, 1, 0, Direction.BOTH)
+
+  const shieldDesc = deserializeTypeRegistry(ctx.shield.readRawRpcDescription(0))
+  shieldDesc.assignMethodIds()
+  const regId = shieldDesc.getMethods().find(m => m.memberName === 'kernel_shield.register_process')?.methodId
+  if (regId === undefined) throw new Error('missing register_process')
+  const localId = 50 + processId
+  const sock = ctx.client.createSocket(localId, SOCKET_OPTS)
+  ctx.client.bind(ctx.shield, localId, 0, Direction.BOTH)
+  ctx.client.setRpcDescription(localId, shieldDesc)
+  const codecs = new CodecRegistry()
+  registerDynamicCodecs(codecs, shieldDesc)
+  ensureRpcCodecs(codecs, shieldDesc)
+  const sc = new SocketRpcClient(sock, shieldDesc, codecs)
+  try {
+    await sc.call(regId, processId, CLIENT_ID, false)
+  } finally {
+    ctx.client.unbind(ctx.shield, localId, 0, Direction.BOTH)
+    ctx.recorder.bind(ctx.shield, 1, 0, Direction.BOTH)
+  }
+}
 
 describe('recorder WASM e2e (real mock-module target)', () => {
   it('records real echo I/O until process error and writes session files', async () => {
@@ -58,6 +93,15 @@ describe('recorder WASM e2e (real mock-module target)', () => {
         expect(meta.status).to.equal('open')
         expect(meta.process_id).to.equal(TARGET_ID)
 
+        await tick(100)
+
+        const bindings = JSON.parse(
+          await fsp.readFile(join(dir, 'bindings.json'), 'utf8')
+        )
+        expect(bindings.process_id).to.equal(TARGET_ID)
+        expect(bindings.bindings).to.be.an('array')
+        await fsp.access(join(dir, `registry.${TARGET_ID}.0.bin`))
+
         const snaps = (await fsp.readdir(dir)).filter((f) => f.startsWith('snap.') && f.endsWith('.bin'))
         expect(snaps.length).to.be.greaterThan(0)
         const snapName = snaps[0]
@@ -82,6 +126,57 @@ describe('recorder WASM e2e (real mock-module target)', () => {
         expect(ctx.target.isAlive).to.equal(false)
         expect(ctx.recorder.isAlive).to.equal(true)
         expect(ctx.store.isAlive).to.equal(true)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+  })
+
+  it('mid-session host bind captures BIND frame and peer registry', async () => {
+    await withTempRoot(async (root) => {
+      const ctx = await setupWasmTargetEnvironment(root)
+      try {
+        const result = await ctx.userClient.call(ctx.methodId('start_recording'), {
+          target_process: BigInt(TARGET_ID),
+          store_process: BigInt(STORE_ID),
+          session_name: 'e2e-mid-bind',
+          labels: {},
+          config: {
+            event_buffer_snapshot_mult: 2,
+            record_mana: false,
+            dump_on_error: false,
+          },
+        }) as Record<string, unknown>
+
+        await tick(20)
+
+        const peerId = 30
+        const { createGeneratedTypeRegistry } = await import('@wa-os/ts-kernel/src/kernelApi.js')
+        const peer = new LocalProcess(ctx.kernel, peerId, 1_000_000)
+        while (ctx.kernel.processes.length <= peerId) {
+          ctx.kernel.processes.push(null)
+        }
+        ctx.kernel.processes[peerId] = peer
+        peer.createSocket(0, SOCKET_OPTS)
+        peer.setRpcDescription(0, createGeneratedTypeRegistry().registry)
+        await registerWithShield(ctx, peerId)
+
+        // Real kernel bind emits process_bind_event to monitors with BIND.
+        await ctx.kernel.bind(TARGET_ID, 0, peerId, 0, Direction.BOTH)
+        await tick(100)
+
+        await ctx.userClient.call(ctx.methodId('dump'), result.recording_id)
+        await tick(40)
+
+        const sessionId = num(result.store_session_id)
+        const dir = join(root, 'sessions', String(sessionId))
+        const io = await fsp.readFile(join(dir, 'io.bin'))
+        expect(io.length).to.be.greaterThan(0)
+
+        const peerRegistry = await fsp.readFile(join(dir, `registry.${peerId}.0.bin`))
+        expect(peerRegistry.byteLength).to.be.greaterThan(0)
+
+        await ctx.userClient.call(ctx.methodId('stop_recording'), result.recording_id)
       } finally {
         await ctx.cleanup()
       }
