@@ -125,7 +125,8 @@ function installKernelMock(
   ) => {
     const call: MockKernelCall = { method: 'kernel.spawn', args: [code, memory_limit, mana_limit] }
     kernelCalls.push(call)
-    const processId = await kernel.spawnLocal(mana_limit)
+    // Real ModuleProcess + WASM (shield spawn must load module code, not LocalProcess).
+    const processId = await kernel.spawn(code, memory_limit, mana_limit)
     call.result = processId
     return processId
   }
@@ -583,6 +584,313 @@ export async function setupWasmTargetEnvironment(
       try { await recorder.kill(undefined) } catch { /* ignore */ }
       try { await store.kill(undefined) } catch { /* ignore */ }
       try { await shield.kill(undefined) } catch { /* ignore */ }
+    },
+  }
+}
+
+/** Shared pieces for multi-module (token↔kv) recording fixtures. */
+export interface TokenKvRecordingContext {
+  kernel: Kernel
+  rootDir: string
+  fsHandle: FsProcessHandle
+  shield: ModuleProcess
+  store: ModuleProcess
+  recorder: ModuleProcess
+  client: LocalProcess
+  /** Recorded process = dbg_token */
+  target: ModuleProcess
+  tokenPid: number
+  kvPid: number
+  kv: ModuleProcess
+  userClient: SocketRpcClient
+  userRegistry: TypeRegistry
+  userSocket: LocalSocket
+  targetClient: SocketRpcClient
+  targetRegistry: TypeRegistry
+  kernelCalls: MockKernelCall[]
+  methodId: (name: string) => number
+  cleanup: () => Promise<void>
+}
+
+type ShieldBootstrap = {
+  kernel: Kernel
+  rootDir: string
+  fsHandle: FsProcessHandle
+  shield: ModuleProcess
+  store: ModuleProcess
+  recorder: ModuleProcess
+  client: LocalProcess
+  userClient: SocketRpcClient
+  userRegistry: TypeRegistry
+  userSocket: LocalSocket
+  kernelCalls: MockKernelCall[]
+  methodId: (name: string) => number
+  shieldDesc: TypeRegistry
+}
+
+async function bootstrapRecorderStack(rootDir: string): Promise<ShieldBootstrap> {
+  const kernel = new Kernel()
+  const kernelCalls: MockKernelCall[] = []
+
+  const shieldCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/kernel-shield.wasm'))
+  const storeCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/debug-store.wasm'))
+  const recorderCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/recorder.wasm'))
+
+  const shield = new ModuleProcess(kernel, SHIELD_ID, 2048, 5_000_000)
+  await shield.setModuleCode(shieldCode)
+  await shield.start()
+  ensureProcessSlot(kernel, SHIELD_ID, shield)
+
+  const store = new ModuleProcess(kernel, STORE_ID, 2048, 5_000_000)
+  await store.setModuleCode(storeCode)
+  await store.start()
+  ensureProcessSlot(kernel, STORE_ID, store)
+
+  const fsHandle = createFsProcess(kernel, {
+    rootDir,
+    processId: FS_ID,
+    socketId: 0,
+    socketOptions: SOCKET_OPTS,
+  })
+  fsHandle.process.bind(store, 0, 1, Direction.BOTH)
+
+  const client = new LocalProcess(kernel, CLIENT_ID, 1_000_000)
+  ensureProcessSlot(kernel, CLIENT_ID, client)
+
+  const recorder = new ModuleProcess(kernel, RECORDER_ID, 2048, 5_000_000)
+  await recorder.setModuleCode(recorderCode)
+  await recorder.start()
+  ensureProcessSlot(kernel, RECORDER_ID, recorder)
+
+  client.createSocket(1, SOCKET_OPTS)
+  client.createSocket(3, SOCKET_OPTS)
+  client.bind(shield, 1, 1, Direction.BOTH)
+  client.bind(shield, 3, 3, Direction.BOTH)
+
+  const { registry: kernelRegistry, types: kernelTypes } = createGeneratedTypeRegistry()
+  installKernelMock(kernel, kernelTypes, kernelCalls)
+  kernelRegistry.assignMethodIds()
+  const kernelCodecs = new CodecRegistry()
+  registerDynamicCodecs(kernelCodecs, kernelRegistry)
+  ensureRpcCodecs(kernelCodecs, kernelRegistry)
+  const kernelSocket = client.getSocket(1) as LocalSocket
+  client.setRpcDescription(1, kernelRegistry)
+  new SocketRpcServer(kernelSocket, kernelRegistry, kernelCodecs)
+
+  const shieldDesc = deserializeTypeRegistry(shield.readRawRpcDescription(0))
+  shieldDesc.assignMethodIds()
+  const shieldMethods = new Map(shieldDesc.getMethods().map((m) => [m.memberName, m.methodId]))
+  const shieldSock = client.createSocket(10, SOCKET_OPTS)
+  client.bind(shield, 10, 0, Direction.BOTH)
+  client.setRpcDescription(10, shieldDesc)
+  const shieldCodecs = new CodecRegistry()
+  registerDynamicCodecs(shieldCodecs, shieldDesc)
+  ensureRpcCodecs(shieldCodecs, shieldDesc)
+  const shieldClient = new SocketRpcClient(shieldSock, shieldDesc, shieldCodecs)
+
+  const registerId = shieldMethods.get('kernel_shield.register_process')
+  if (registerId === undefined) throw new Error('missing register_process')
+  await shieldClient.call(registerId, STORE_ID, CLIENT_ID, false)
+  await shieldClient.call(registerId, RECORDER_ID, CLIENT_ID, false)
+
+  client.unbind(shield, 10, 0, Direction.BOTH)
+  recorder.bind(shield, 1, 0, Direction.BOTH)
+
+  const userSocket = client.createSocket(0, LARGE_SOCKET_OPTS)
+  client.bind(recorder, 0, 0, Direction.BOTH)
+
+  const userRegistry = deserializeTypeRegistry(recorder.readRawRpcDescription(0))
+  userRegistry.assignMethodIds()
+  client.setRpcDescription(0, userRegistry)
+  const userCodecs = new CodecRegistry()
+  registerDynamicCodecs(userCodecs, userRegistry)
+  ensureRpcCodecs(userCodecs, userRegistry)
+  const userClient = new SocketRpcClient(userSocket, userRegistry, userCodecs)
+
+  const methods = new Map(userRegistry.getMethods().map((m) => [m.memberName, m.methodId]))
+  const methodId = (name: string) => {
+    const full = name.includes('.') ? name : `recorder.${name}`
+    const id = methods.get(full)
+    if (id === undefined) {
+      throw new Error(`missing method ${full}; have: ${[...methods.keys()].join(', ')}`)
+    }
+    return id
+  }
+
+  return {
+    kernel,
+    rootDir,
+    fsHandle,
+    shield,
+    store,
+    recorder,
+    client,
+    userClient,
+    userRegistry,
+    userSocket,
+    kernelCalls,
+    methodId,
+    shieldDesc,
+  }
+}
+
+/**
+ * Steal shield USER from recorder, run fn with SocketRpcClient, restore recorder bind.
+ */
+let shieldUserSocketSeq = 40
+
+export async function withShieldUserClient<T>(
+  ctx: {
+    client: LocalProcess
+    shield: ModuleProcess
+    recorder: ModuleProcess
+    shieldDesc: TypeRegistry
+  },
+  fn: (sc: SocketRpcClient, methodId: (name: string) => number) => Promise<T>
+): Promise<T> {
+  ctx.recorder.unbind(ctx.shield, 1, 0, Direction.BOTH)
+  const localId = shieldUserSocketSeq++
+  const sock = ctx.client.createSocket(localId, SOCKET_OPTS)
+  ctx.client.bind(ctx.shield, localId, 0, Direction.BOTH)
+  ctx.client.setRpcDescription(localId, ctx.shieldDesc)
+  const codecs = new CodecRegistry()
+  registerDynamicCodecs(codecs, ctx.shieldDesc)
+  ensureRpcCodecs(codecs, ctx.shieldDesc)
+  const sc = new SocketRpcClient(sock, ctx.shieldDesc, codecs)
+  const methods = new Map(ctx.shieldDesc.getMethods().map((m) => [m.memberName, m.methodId]))
+  const methodId = (name: string) => {
+    const id = methods.get(name.includes('.') ? name : `kernel_shield.${name}`)
+      ?? methods.get(name)
+    if (id === undefined) {
+      throw new Error(`missing shield method ${name}; have: ${[...methods.keys()].join(', ')}`)
+    }
+    return id
+  }
+  try {
+    return await fn(sc, methodId)
+  } finally {
+    ctx.client.unbind(ctx.shield, localId, 0, Direction.BOTH)
+    ctx.recorder.bind(ctx.shield, 1, 0, Direction.BOTH)
+  }
+}
+
+/**
+ * Spawn WASM as ModuleProcess, register with shield, bind KERNEL_API
+ * (process.1 ↔ shield.(pid<<1)|1).
+ *
+ * Uses host `kernel.spawn` rather than `kernel_shield.spawn`: dbg_*.wasm are
+ * multi‑MB and the shield KERNEL socket buffers (~1KiB) cannot carry the code blob.
+ * Topology after this helper matches a typical shield-wired process.
+ */
+export async function spawnAndWireViaShield(
+  ctx: {
+    client: LocalProcess
+    shield: ModuleProcess
+    recorder: ModuleProcess
+    shieldDesc: TypeRegistry
+    kernel: Kernel
+  },
+  code: Uint8Array,
+  memoryPages = 16,
+  manaLimit = 5_000_000
+): Promise<number> {
+  const pid = await ctx.kernel.spawn(code, memoryPages, manaLimit)
+  await withShieldUserClient(ctx, async (sc, methodId) => {
+    await sc.call(methodId('register_process'), pid, CLIENT_ID, false)
+    await sc.call(
+      methodId('bind'),
+      pid,
+      1,
+      SHIELD_ID,
+      (pid << 1) | 1,
+      Direction.BOTH
+    )
+  })
+  return pid
+}
+
+/**
+ * Typical topology: spawn dbg_kv + dbg_token via shield, bind KERNEL_API,
+ * bind token.2 ↔ kv.0, host SocketRpcClient on token.0.
+ */
+export async function setupTokenKvEnvironment(
+  rootDir: string,
+  options: {
+    tokenWasmPath: string
+    kvWasmPath: string
+    buildTokenRegistry: () => TypeRegistry
+  }
+): Promise<TokenKvRecordingContext> {
+  const base = await bootstrapRecorderStack(rootDir)
+  const tokenCode = await readFile(options.tokenWasmPath)
+  const kvCode = await readFile(options.kvWasmPath)
+
+  const kvPid = await spawnAndWireViaShield(base, kvCode)
+  const tokenPid = await spawnAndWireViaShield(base, tokenCode)
+
+  await withShieldUserClient(base, async (sc, methodId) => {
+    await sc.call(
+      methodId('bind'),
+      tokenPid,
+      2,
+      kvPid,
+      0,
+      Direction.BOTH
+    )
+  })
+
+  const target = base.kernel.processes[tokenPid] as ModuleProcess
+  const kv = base.kernel.processes[kvPid] as ModuleProcess
+  if (!target || !kv) {
+    throw new Error(`spawned processes missing: token=${tokenPid} kv=${kvPid}`)
+  }
+
+  const targetSock = base.client.createSocket(20, SOCKET_OPTS)
+  base.client.bind(target, 20, 0, Direction.BOTH)
+
+  let targetRegistry = options.buildTokenRegistry()
+  try {
+    const raw = target.readRawRpcDescription(0)
+    if (raw && raw.length > 0) {
+      const fromWasm = deserializeTypeRegistry(raw)
+      fromWasm.assignMethodIds()
+      targetRegistry = fromWasm
+    }
+  } catch {
+    /* keep host registry */
+  }
+
+  base.client.setRpcDescription(20, targetRegistry)
+  const targetCodecs = new CodecRegistry()
+  registerDynamicCodecs(targetCodecs, targetRegistry)
+  ensureRpcCodecs(targetCodecs, targetRegistry)
+  const targetClient = new SocketRpcClient(targetSock, targetRegistry, targetCodecs)
+
+  return {
+    kernel: base.kernel,
+    rootDir: base.rootDir,
+    fsHandle: base.fsHandle,
+    shield: base.shield,
+    store: base.store,
+    recorder: base.recorder,
+    client: base.client,
+    target,
+    tokenPid,
+    kvPid,
+    kv,
+    userClient: base.userClient,
+    userRegistry: base.userRegistry,
+    userSocket: base.userSocket,
+    targetClient,
+    targetRegistry,
+    kernelCalls: base.kernelCalls,
+    methodId: base.methodId,
+    cleanup: async () => {
+      try { await target.kill(undefined) } catch { /* ignore */ }
+      try { await kv.kill(undefined) } catch { /* ignore */ }
+      try { await base.recorder.kill(undefined) } catch { /* ignore */ }
+      try { await base.store.kill(undefined) } catch { /* ignore */ }
+      try { await base.shield.kill(undefined) } catch { /* ignore */ }
     },
   }
 }

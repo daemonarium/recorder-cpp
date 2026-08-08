@@ -498,8 +498,16 @@ namespace waos {
       request_.code.clear();
     }
 
-    // Target socket 0: empty placeholder avoids ModuleProcess rpc_description hangs.
-    send_registry_payload(target, 0, {});
+    // Target socket 0: soft-fetch via shield (kernel soft OrEmpty — no process kill).
+    {
+      std::vector<std::uint8_t> bytes;
+      try {
+        bytes = co_await shield_client::shield_rpc_client->get_rpc_description(target, 0);
+      } catch(...) {
+        bytes.clear();
+      }
+      send_registry_payload(target, 0, bytes);
+    }
 
     std::set<std::pair<std::uint64_t, std::uint32_t>> keys;
     for(const auto& b : bindings) {
@@ -509,6 +517,8 @@ namespace waos {
     keys.erase({target, 0});
 
     for(const auto& [pid, sock] : keys) {
+      // Other local target sockets (e.g. KERNEL_API client end): empty placeholder —
+      // they do not expose a public object API.
       if(pid == target) {
         send_registry_payload(pid, sock, {});
         continue;

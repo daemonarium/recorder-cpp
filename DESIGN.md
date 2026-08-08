@@ -151,9 +151,10 @@ After the **first complete save anchor** in `start_recording`:
 
 1. `list_socket_bindings(target)` via shield → `debug_bindings_event` + serialized `bindings_snapshot` (`bindings.bin`)
 2. If `start_recording_request.code` is non-empty → `debug_code_event` + bytes → `code.wasm`, then clear the in-RAM copy
-3. `registry.<target>.0.bin` written as empty placeholder (avoids hanging `rpc_description` on ModuleProcess targets)
-4. For each peer `(peer_process, peer_socket)` (and other local sockets ≠ 0): `get_rpc_description` → `debug_registry_event` (empty on soft-fail / unregistered)
-5. `debug_session.sync` so files are durable before start returns
+3. Soft-fetch `get_rpc_description(target, 0)` → `registry.<target>.0.bin` (empty on soft-fail; kernel uses non-killing `readRawRpcDescriptionOrEmpty`)
+4. For other **local** target sockets (client ends such as KERNEL_API): write empty registry placeholders (no public object API)
+5. For each **peer** `(peer_process, peer_socket)`: `get_rpc_description` → `debug_registry_event` (empty on soft-fail). **kernel-shield (pid 1)** answers its own sockets locally (USER / KERNEL_API faces) without being in the shield `processes` table
+6. `debug_session.sync` so files are durable before start returns
 
 Mid-session:
 
