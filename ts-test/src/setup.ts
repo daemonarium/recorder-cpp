@@ -510,18 +510,8 @@ export async function setupWasmTargetEnvironment(
   let targetRegistry: TypeRegistry
   if (options?.buildTargetRegistry) {
     targetRegistry = options.buildTargetRegistry()
-    try {
-      const raw = target.readRawRpcDescription(0)
-      if (raw && raw.length > 0) {
-        const fromWasm = deserializeTypeRegistry(raw)
-        fromWasm.assignMethodIds()
-        targetRegistry = fromWasm
-      }
-    } catch {
-      /* keep host registry */
-    }
   } else {
-    // Default mock-module echo registry (host-built; historical rpc_description hang).
+    // Default mock-module echo registry (host-built fallback).
     targetRegistry = new TypeRegistry()
     const binaryType = targetRegistry.getTypeByName('binary')
     if (!binaryType) throw new Error('TypeRegistry missing binary')
@@ -540,6 +530,16 @@ export async function setupWasmTargetEnvironment(
     targetRegistry.registerType(echoApi)
     targetRegistry.assignMethodIds()
     ensureRpcTypesInRegistry(targetRegistry)
+  }
+  try {
+    const raw = target.readRawRpcDescriptionOrEmpty(0)
+    if (raw && raw.length > 0) {
+      const fromWasm = deserializeTypeRegistry(raw)
+      fromWasm.assignMethodIds()
+      targetRegistry = fromWasm
+    }
+  } catch {
+    /* keep host/fallback registry */
   }
 
   client.setRpcDescription(20, targetRegistry)

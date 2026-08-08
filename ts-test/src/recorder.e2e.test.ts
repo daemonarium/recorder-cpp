@@ -100,13 +100,15 @@ describe('recorder WASM e2e (real mock-module target)', () => {
         await tick(20)
         const saveCalls = ctx.kernelCalls.filter((c) => c.method === 'kernel.save')
         expect(saveCalls.length).to.be.greaterThan(0)
-        const saveResult = saveCalls[saveCalls.length - 1].result as {
+        // Initial recording save — not a later dump_on_error save after kill.
+        const saveResult = saveCalls[0]!.result as {
           memory: Uint8Array
           snapshot_uid: bigint | number
         }
         // get_memory() returns a live view — copy before further target I/O mutates it.
         const anchorMemory = Uint8Array.from(saveResult.memory)
         expect(anchorMemory.byteLength).to.be.greaterThan(0)
+        const snapUid = String(num(saveResult.snapshot_uid))
 
         const payloadA = new TextEncoder().encode('hello-rec-1')
         const payloadB = new Uint8Array([0xde, 0xad, 0xbe, 0xef])
@@ -150,10 +152,8 @@ describe('recorder WASM e2e (real mock-module target)', () => {
           (f) => f.startsWith('snap.') && f.endsWith('.bin') && !f.includes('.meta.')
         )
         expect(snaps.length).to.be.greaterThan(0)
-        const snapName = snaps[0]
-        const uidMatch = /^snap\.(\d+)\.bin$/.exec(snapName)
-        expect(uidMatch).to.be.ok
-        const snapUid = uidMatch![1]
+        const snapName = `snap.${snapUid}.bin`
+        expect(snaps, `missing ${snapName} in ${snaps.join(',')}`).to.include(snapName)
 
         const snapBytes = await fsp.readFile(join(dir, snapName))
         expect(Buffer.from(snapBytes).equals(Buffer.from(anchorMemory))).to.equal(true)
