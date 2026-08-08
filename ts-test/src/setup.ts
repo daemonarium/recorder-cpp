@@ -393,18 +393,26 @@ export async function setupTestEnvironment(rootDir: string): Promise<TestContext
 }
 
 /**
- * Same topology as setupTestEnvironment, but TARGET is mock-module.wasm
- * (real RPC echo) instead of a LocalProcess stub.
+ * Same topology as setupTestEnvironment, but TARGET is a real WASM ModuleProcess.
+ * Defaults to mock-module.wasm + host-built echo registry.
+ * Pass `targetWasmPath` / `buildTargetRegistry` for sample dbg_* modules.
  */
-export async function setupWasmTargetEnvironment(rootDir: string): Promise<WasmTargetTestContext> {
+export async function setupWasmTargetEnvironment(
+  rootDir: string,
+  options?: {
+    targetWasmPath?: string
+    buildTargetRegistry?: () => TypeRegistry
+  }
+): Promise<WasmTargetTestContext> {
   const kernel = new Kernel()
   const kernelCalls: MockKernelCall[] = []
 
   const shieldCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/kernel-shield.wasm'))
   const storeCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/debug-store.wasm'))
   const recorderCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/recorder.wasm'))
-  const mockCode = await readFile(
-    join(__dirname, '../../../cmake-build-emscripten/kernel-shield/cpp-test/mock-module.wasm')
+  const targetCode = await readFile(
+    options?.targetWasmPath ??
+      join(__dirname, '../../../cmake-build-emscripten/kernel-shield/cpp-test/mock-module.wasm')
   )
 
   const shield = new ModuleProcess(kernel, SHIELD_ID, 2048, 5_000_000)
@@ -430,7 +438,7 @@ export async function setupWasmTargetEnvironment(rootDir: string): Promise<WasmT
 
   // initial == maximumMemoryPages in ModuleProcess; keep small so save/dump snapshots fit sockets.
   const target = new ModuleProcess(kernel, TARGET_ID, 16, 5_000_000)
-  await target.setModuleCode(mockCode)
+  await target.setModuleCode(targetCode)
   await target.start()
   ensureProcessSlot(kernel, TARGET_ID, target)
 
@@ -495,29 +503,44 @@ export async function setupWasmTargetEnvironment(rootDir: string): Promise<WasmT
     return id
   }
 
-  // Client ↔ mock-module USER (socket 0). Registry is built on the host — mock-module's
-  // rpc_description re-runs register_all and throws under wasm-exceptions.
   const targetSock = client.createSocket(20, SOCKET_OPTS)
   client.bind(target, 20, 0, Direction.BOTH)
 
-  const targetRegistry = new TypeRegistry()
-  const binaryType = targetRegistry.getTypeByName('binary')
-  if (!binaryType) throw new Error('TypeRegistry missing binary')
-  const echoFunc = TypeDescription.create({
-    name: 'mock_api.echo',
-    kind: TypeKind.Function,
-    members: [{ name: 'data', type: binaryType, annotations: [] }],
-    item: binaryType,
-  })
-  const echoApi = TypeDescription.create({
-    name: 'mock_api',
-    kind: TypeKind.Object,
-    members: [{ name: 'echo', type: echoFunc, annotations: [] }],
-  })
-  targetRegistry.registerType(echoFunc)
-  targetRegistry.registerType(echoApi)
-  targetRegistry.assignMethodIds()
-  ensureRpcTypesInRegistry(targetRegistry)
+  let targetRegistry: TypeRegistry
+  if (options?.buildTargetRegistry) {
+    targetRegistry = options.buildTargetRegistry()
+    try {
+      const raw = target.readRawRpcDescription(0)
+      if (raw && raw.length > 0) {
+        const fromWasm = deserializeTypeRegistry(raw)
+        fromWasm.assignMethodIds()
+        targetRegistry = fromWasm
+      }
+    } catch {
+      /* keep host registry */
+    }
+  } else {
+    // Default mock-module echo registry (host-built; historical rpc_description hang).
+    targetRegistry = new TypeRegistry()
+    const binaryType = targetRegistry.getTypeByName('binary')
+    if (!binaryType) throw new Error('TypeRegistry missing binary')
+    const echoFunc = TypeDescription.create({
+      name: 'mock_api.echo',
+      kind: TypeKind.Function,
+      members: [{ name: 'data', type: binaryType, annotations: [] }],
+      item: binaryType,
+    })
+    const echoApi = TypeDescription.create({
+      name: 'mock_api',
+      kind: TypeKind.Object,
+      members: [{ name: 'echo', type: echoFunc, annotations: [] }],
+    })
+    targetRegistry.registerType(echoFunc)
+    targetRegistry.registerType(echoApi)
+    targetRegistry.assignMethodIds()
+    ensureRpcTypesInRegistry(targetRegistry)
+  }
+
   client.setRpcDescription(20, targetRegistry)
   const targetCodecs = new CodecRegistry()
   registerDynamicCodecs(targetCodecs, targetRegistry)
@@ -525,16 +548,12 @@ export async function setupWasmTargetEnvironment(rootDir: string): Promise<WasmT
   const targetClient = new SocketRpcClient(targetSock, targetRegistry, targetCodecs)
 
   const echoMethod = targetRegistry.getMethods().find(
-    (m) => m.memberName === 'echo' || m.memberName === 'mock_api.echo'
+    (m) => m.memberName === 'echo' || m.memberName.endsWith('.echo')
   )
-  if (!echoMethod) {
-    throw new Error(
-      `echo method missing; have: ${targetRegistry.getMethods().map((m) => m.memberName).join(', ')}`
-    )
-  }
-  const echoMethodId = echoMethod.methodId
+  const echoMethodId = echoMethod?.methodId ?? -1
 
   const echo = async (payload: Uint8Array): Promise<Uint8Array> => {
+    if (echoMethodId < 0) throw new Error('echo method not available on this target')
     const result = await targetClient.call(echoMethodId, payload)
     if (result instanceof Uint8Array) return result
     if (result instanceof ArrayBuffer) return new Uint8Array(result)
