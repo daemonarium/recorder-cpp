@@ -60,8 +60,8 @@ namespace waos {
       std::uint64_t store_session_id_ = 0;
       std::uint64_t store_remote_session_socket_ = 0;
 
-      std::unique_ptr<serialization::socket_rpc_client> store_user_client_;
-      std::unique_ptr<serialization::socket_rpc_client> store_session_client_;
+      std::unique_ptr<serialization::compressed_socket_rpc_client> store_user_client_;
+      std::unique_ptr<serialization::compressed_socket_rpc_client> store_session_client_;
       std::unique_ptr<serialization::socket_message_channel> monitor_channel_;
       std::unique_ptr<serialization::socket_message_channel> log_channel_;
 

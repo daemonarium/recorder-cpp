@@ -14,7 +14,7 @@
 #include "sockets.hpp"
 #include "recording.hpp"
 
-std::unique_ptr<serialization::socket_rpc_server> user_rpc_server_;
+std::unique_ptr<serialization::compressed_socket_rpc_server> user_rpc_server_;
 
 static size_t serialize_registry(serialization::type_registry& reg, char** buffer) {
   serialization::type_description::create(serialization::read_annotation(), reg);
@@ -69,7 +69,7 @@ extern "C" void start() {
   };
 
   socket_open(static_cast<std::uint32_t>(base_socket_id::USER), &socket_options);
-  user_rpc_server_ = std::make_unique<serialization::socket_rpc_server>(
+  user_rpc_server_ = std::make_unique<serialization::compressed_socket_rpc_server>(
     static_cast<std::uint32_t>(base_socket_id::USER)
   );
   waos::rpc_registration::active_registry = &waos::rpc_registration::registry;

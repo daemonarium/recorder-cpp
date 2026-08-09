@@ -557,7 +557,7 @@ namespace waos {
 
     co_await send_io_blob(io_bytes_);
 
-    store_session_rpc<serialization::socket_rpc_client*> session_rpc(store_session_client_.get());
+    store_session_rpc<serialization::compressed_socket_rpc_client*> session_rpc(store_session_client_.get());
     co_await session_rpc.sync();
 
     if(state_ == recording_state::Dumping) {
@@ -622,7 +622,7 @@ namespace waos {
     // Bind to store USER and begin session
     store_user_socket_ = alloc_socket();
     open_socket(store_user_socket_);
-    store_user_client_ = std::make_unique<serialization::socket_rpc_client>(store_user_socket_);
+    store_user_client_ = std::make_unique<serialization::compressed_socket_rpc_client>(store_user_socket_);
     store_user_client_->register_basic_types();
     {
       auto client_ptr = store_user_client_.get();
@@ -642,14 +642,14 @@ namespace waos {
       .process_id = request_.target_process,
       .labels = request_.labels,
     };
-    store_rpc<serialization::socket_rpc_client*> store(store_user_client_.get());
+    store_rpc<serialization::compressed_socket_rpc_client*> store(store_user_client_.get());
     auto begin_res = co_await store.begin(begin_req);
     store_session_id_ = begin_res.session_id;
     store_remote_session_socket_ = begin_res.store_socket;
 
     store_session_socket_ = alloc_socket();
     open_socket(store_session_socket_);
-    store_session_client_ = std::make_unique<serialization::socket_rpc_client>(store_session_socket_);
+    store_session_client_ = std::make_unique<serialization::compressed_socket_rpc_client>(store_session_socket_);
     store_session_client_->register_basic_types();
     setup_store_session_messages();
     {
@@ -692,7 +692,7 @@ namespace waos {
     }
 
     co_await capture_initial_topology();
-    store_session_rpc<serialization::socket_rpc_client*> session_rpc(store_session_client_.get());
+    store_session_rpc<serialization::compressed_socket_rpc_client*> session_rpc(store_session_client_.get());
     co_await session_rpc.sync();
     co_return;
   }

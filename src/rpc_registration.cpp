@@ -8,7 +8,7 @@ namespace waos {
 
     static waos::recorder recorder_api;
 
-    void register_user_api(serialization::socket_rpc_server* server, bool register_type) {
+    void register_user_api(serialization::compressed_socket_rpc_server* server, bool register_type) {
       if(server != nullptr) server->register_basic_types();
 
       waos::record_config cfg;

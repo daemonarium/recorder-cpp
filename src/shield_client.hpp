@@ -69,7 +69,7 @@ namespace waos {
 
   namespace shield_client {
 
-    using rpc_client_type = serialization::socket_rpc_client;
+    using rpc_client_type = serialization::compressed_socket_rpc_client;
 
     extern std::shared_ptr<rpc_client_type> rpc_client;
     extern std::shared_ptr<shield_rpc<rpc_client_type*>> shield_rpc_client;
