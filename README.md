@@ -17,8 +17,8 @@ cmake --build cmake-build-emscripten --target recorder-wasm
 Native packer CLI (non-WASM build):
 
 ```bash
-cmake -S . -B build
-cmake --build build --target waosrec
+cmake -S . -B cmake-build-debug
+cmake --build cmake-build-debug --target waosrec   # or build/ if that’s your tree
 # waosrec pack <session-dir> -o out.waosrec
 # waosrec info out.waosrec
 ```
@@ -33,7 +33,7 @@ Requires [`kernel-shield`](../kernel-shield/) and [`debug-store`](../debug-store
 | 1 | SHIELD — outbound to kernel-shield USER |
 | ≥2 | per-target monitor, log ingress, store USER (temp), store session |
 
-Host must bind `recorder.1 ↔ kernel-shield.0` before use. On `start_recording`, the module binds to debug-store via `shield.bind`, calls `begin`, then monitors/saves the target through shield (monitor + log channels use **flat** message framing). Pass target WASM bytes in `start_recording.code` (empty OK for LocalProcess); recorder dumps them to store as `code.wasm` and clears the session copy.
+Host must bind `recorder.1 ↔ kernel-shield.0` before use. On `start_recording`, the module binds to debug-store via `shield.bind`, calls `begin`, then monitors/saves the target through shield. USER RPC and monitor/log channels use **flat** (`flat_socket_rpc_*` / flat message framing). Pass target WASM bytes in `start_recording.code` (empty OK for LocalProcess); recorder dumps them to store as `code.wasm` and clears the session copy. Fixture harnesses prefer **`dump_and_clear`** over bare `dump` when `dump_on_error` may still fire.
 
 | RPC | Window after persist |
 |-----|----------------------|
@@ -48,7 +48,7 @@ Host must bind `recorder.1 ↔ kernel-shield.0` before use. On `start_recording`
 ```bash
 # build required WASMs first (mock-module = e2e echo target)
 cmake --build cmake-build-emscripten --target mock-module recorder-wasm kernel-shield debug-store
-cmake --build build --target waosrec   # for e2e pack round-trip
+cmake --build cmake-build-debug --target waosrec   # for e2e pack round-trip; or build/
 npm install
 npm test -w @wa-os/recorder-tests
 ```
