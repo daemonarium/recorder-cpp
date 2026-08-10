@@ -2,12 +2,10 @@
 
 #include <serialization/type_registry.hpp>
 #include <serialization/type_description.hpp>
-#include <serialization/stream_writer.hpp>
-#include <serialization/serialize.hpp>
+#include <serialization/type_registry_blob.hpp>
 
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <stdexcept>
 
@@ -109,19 +107,14 @@ namespace {
     registry.register_type(serialization::type_description::create(bindings, registry));
 
     serialization::type_description::create(serialization::read_annotation(), registry);
-    std::ostringstream output_stream;
-    serialization::stream_writer writer(output_stream);
-    writer.register_serialize_typed_function<serialization::type_description>();
-    writer.register_serialize_typed_function<serialization::read_annotation>();
-    serialize(writer, registry);
-    writer.write_rest();
+    const std::string bytes = serialization::serialize_type_registry_blob(registry);
 
     std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
     if(!out) {
       throw std::runtime_error("failed to write " + out_path);
     }
-    out << output_stream.str();
-    std::cout << "wrote registry bytes=" << output_stream.str().size() << " -> " << out_path << "\n";
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    std::cout << "wrote registry bytes=" << bytes.size() << " -> " << out_path << "\n";
     return 0;
   }
 

@@ -1,4 +1,4 @@
-#include <serialization/stream_writer.hpp>
+#include <serialization/type_registry_blob.hpp>
 #include <serialization/socket_rpc_server.hpp>
 #include <serialization/type_registry.hpp>
 #include <serialization/type_description.hpp>
@@ -7,7 +7,6 @@
 #include <memory>
 #include <cstring>
 #include <cstdlib>
-#include <sstream>
 
 #include "shield_client.hpp"
 #include "rpc_registration.hpp"
@@ -18,18 +17,7 @@ std::unique_ptr<serialization::compressed_socket_rpc_server> user_rpc_server_;
 
 static size_t serialize_registry(serialization::type_registry& reg, char** buffer) {
   serialization::type_description::create(serialization::read_annotation(), reg);
-  std::ostringstream output_stream;
-  serialization::stream_writer writer(output_stream);
-
-  writer.register_serialize_typed_function<serialization::type_description>();
-  writer.register_serialize_typed_function<serialization::read_annotation>();
-
-  serialize(writer, reg);
-  writer.write_rest();
-
-  *buffer = (char*)malloc(output_stream.str().size());
-  memcpy(*buffer, output_stream.str().data(), output_stream.str().size());
-  return output_stream.str().size();
+  return serialization::serialize_type_registry_blob_malloc(reg, buffer);
 }
 
 size_t user_rpc_description(char** buffer) {
