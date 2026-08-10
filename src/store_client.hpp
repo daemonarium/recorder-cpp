@@ -39,7 +39,7 @@ namespace waos {
         return rpc_client_->template call<void>(3, error);
       }
 
-      serialization::compressed_socket_rpc_client* client() { return rpc_client_; }
+      serialization::flat_socket_rpc_client* client() { return rpc_client_; }
 
     private:
       rpc_client_ptr_type rpc_client_;

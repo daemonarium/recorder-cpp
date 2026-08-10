@@ -607,6 +607,8 @@ export interface TokenKvRecordingContext {
   userSocket: LocalSocket
   targetClient: SocketRpcClient
   targetRegistry: TypeRegistry
+  /** Optional peer (kv / cpeer) registry for inject/decode */
+  peerRegistry?: TypeRegistry
   kernelCalls: MockKernelCall[]
   methodId: (name: string) => number
   cleanup: () => Promise<void>
@@ -810,8 +812,11 @@ export async function spawnAndWireViaShield(
 }
 
 /**
- * Typical topology: spawn dbg_kv + dbg_token via shield, bind KERNEL_API,
- * bind token.2 ↔ kv.0, host SocketRpcClient on token.0.
+ * Typical topology: spawn peer + client via shield, bind KERNEL_API,
+ * bind client.2 ↔ peer.0, host SocketRpcClient on client.0.
+ *
+ * Defaults match dbg_token + dbg_kv (flat). Pass targetRpcFormat: 'compressed'
+ * for dbg_cclient; peer registry builder for inject/decode of compressed peer.
  */
 export async function setupTokenKvEnvironment(
   rootDir: string,
@@ -819,11 +824,14 @@ export async function setupTokenKvEnvironment(
     tokenWasmPath: string
     kvWasmPath: string
     buildTokenRegistry: () => TypeRegistry
+    buildPeerRegistry?: () => TypeRegistry
+    targetRpcFormat?: 'flat' | 'compressed'
   }
 ): Promise<TokenKvRecordingContext> {
   const base = await bootstrapRecorderStack(rootDir)
   const tokenCode = await readFile(options.tokenWasmPath)
   const kvCode = await readFile(options.kvWasmPath)
+  const targetRpcFormat = options.targetRpcFormat ?? 'flat'
 
   const kvPid = await spawnAndWireViaShield(base, kvCode)
   const tokenPid = await spawnAndWireViaShield(base, tokenCode)
@@ -860,11 +868,28 @@ export async function setupTokenKvEnvironment(
     /* keep host registry */
   }
 
+  let peerRegistry: TypeRegistry | undefined
+  if (options.buildPeerRegistry) {
+    peerRegistry = options.buildPeerRegistry()
+    try {
+      const raw = kv.readRawRpcDescription(0)
+      if (raw && raw.length > 0) {
+        const fromWasm = deserializeTypeRegistry(raw)
+        fromWasm.assignMethodIds()
+        peerRegistry = fromWasm
+      }
+    } catch {
+      /* keep host peer registry */
+    }
+  }
+
   base.client.setRpcDescription(20, targetRegistry)
   const targetCodecs = new CodecRegistry()
   registerDynamicCodecs(targetCodecs, targetRegistry)
   ensureRpcCodecs(targetCodecs, targetRegistry)
-  const targetClient = new SocketRpcClient(targetSock, targetRegistry, targetCodecs)
+  const targetClient = new SocketRpcClient(targetSock, targetRegistry, targetCodecs, {
+    format: targetRpcFormat,
+  })
 
   return {
     kernel: base.kernel,
@@ -883,6 +908,7 @@ export async function setupTokenKvEnvironment(
     userSocket: base.userSocket,
     targetClient,
     targetRegistry,
+    peerRegistry,
     kernelCalls: base.kernelCalls,
     methodId: base.methodId,
     cleanup: async () => {

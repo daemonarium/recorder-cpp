@@ -346,11 +346,96 @@ describe('recorder WASM', () => {
     })
   })
 
+  it('dump twice appends the same window again', async () => {
+    await withTempRoot(async (root) => {
+      const ctx = await setupTestEnvironment(root)
+      try {
+        const result = await ctx.userClient.call(ctx.methodId('start_recording'), {
+          target_process: BigInt(TARGET_ID),
+          store_process: BigInt(STORE_ID),
+          session_name: 'dump-twice',
+          labels: {},
+          config: {
+            event_buffer_snapshot_mult: 2,
+            record_mana: false,
+            dump_on_error: false,
+          },
+          code: new Uint8Array(),
+        }) as Record<string, unknown>
+
+        await tick(20)
+        const payload = new Uint8Array([11, 22, 33, 44])
+        emitCopy(ctx, payload.length, payload)
+        await tick(20)
+
+        await ctx.userClient.call(ctx.methodId('dump'), result.recording_id)
+        await tick(30)
+        const sessionId = num(result.store_session_id)
+        const ioPath = join(root, 'sessions', String(sessionId), 'io.bin')
+        const afterFirst = (await fsp.readFile(ioPath)).length
+        expect(afterFirst).to.be.greaterThan(0)
+
+        await ctx.userClient.call(ctx.methodId('dump'), result.recording_id)
+        await tick(30)
+        const afterSecond = (await fsp.readFile(ioPath)).length
+        expect(afterSecond).to.be.greaterThanOrEqual(afterFirst * 2)
+
+        await ctx.userClient.call(ctx.methodId('stop_recording'), result.recording_id)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+  })
+
+  it('dump_and_clear then dump without new I/O does not re-append window', async () => {
+    await withTempRoot(async (root) => {
+      const ctx = await setupTestEnvironment(root)
+      try {
+        const result = await ctx.userClient.call(ctx.methodId('start_recording'), {
+          target_process: BigInt(TARGET_ID),
+          store_process: BigInt(STORE_ID),
+          session_name: 'dump-and-clear',
+          labels: {},
+          config: {
+            event_buffer_snapshot_mult: 2,
+            record_mana: false,
+            dump_on_error: false,
+          },
+          code: new Uint8Array(),
+        }) as Record<string, unknown>
+
+        await tick(20)
+        const payload = new Uint8Array([7, 8, 9])
+        emitCopy(ctx, payload.length, payload)
+        await tick(20)
+
+        await ctx.userClient.call(ctx.methodId('dump_and_clear'), result.recording_id)
+        await tick(30)
+        const sessionId = num(result.store_session_id)
+        const ioPath = join(root, 'sessions', String(sessionId), 'io.bin')
+        const afterClear = (await fsp.readFile(ioPath)).length
+        expect(afterClear).to.be.greaterThan(0)
+        expect(Buffer.from(await fsp.readFile(ioPath)).includes(Buffer.from(payload))).to.equal(true)
+
+        await ctx.userClient.call(ctx.methodId('dump'), result.recording_id)
+        await tick(30)
+        const afterSecond = (await fsp.readFile(ioPath)).length
+        expect(afterSecond).to.equal(afterClear)
+
+        await ctx.userClient.call(ctx.methodId('stop_recording'), result.recording_id)
+      } finally {
+        await ctx.cleanup()
+      }
+    })
+  })
+
   it('rotate cuts old prefix from subsequent dump', async () => {
     await withTempRoot(async (root) => {
       const ctx = await setupTestEnvironment(root)
       try {
-        ctx.target.memory = new Uint8Array(16).fill(1)
+        // Keep memory large enough that a single COPY frame does not trip
+        // maybe_request_rotate (flat frames are larger than compressed).
+        ctx.target.memory = new Uint8Array(256).fill(1)
 
         const result = await ctx.userClient.call(ctx.methodId('start_recording'), {
           target_process: BigInt(TARGET_ID),
@@ -358,7 +443,7 @@ describe('recorder WASM', () => {
           session_name: 'rotate',
           labels: {},
           config: {
-            event_buffer_snapshot_mult: 1,
+            event_buffer_snapshot_mult: 2,
             record_mana: false,
             dump_on_error: false,
           },

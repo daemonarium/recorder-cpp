@@ -48,7 +48,7 @@ Host-only FS stays in `ts-fs`. Recorder does not touch the filesystem directly.
 ## Topology (conceptual)
 
 ```
-                    USER RPC (start/stop/dump/rotate)
+                    USER RPC (start/stop/dump/dump_and_clear/rotate)
 Client ───────────────────────────────────────────► recorder.wasm
                                                          │
               per-target MONITOR socket (kernel events)  │
@@ -130,7 +130,16 @@ state:   Starting | Idle | RotatePending | Dumping | Stopping
 
 **Dump during `RotatePending`:** dump the **previous** complete snapshot + its `io_bytes`.
 
-**API:** `dump` (no window change), `rotate` (force save + cut). `dump_and_rotate` — **not in v1**.
+**API:**
+
+| RPC | Effect |
+|-----|--------|
+| `dump` | Persist current window; **`io_bytes` unchanged** |
+| `dump_and_clear` | Same persist as `dump`, then **clear `io_bytes`** (no new save/anchor) |
+| `rotate` | Force save + cut (new anchor; drop I/O up to cut) |
+| `dump_and_rotate` | **Not in v1** (dump + rotate as one op) |
+
+`dump_and_clear` ≠ `rotate`: clear drops the I/O window only; rotate installs a new memory snapshot cut.
 
 ---
 
@@ -139,7 +148,7 @@ state:   Starting | Idle | RotatePending | Dumping | Stopping
 1. `debug_snapshot_event {uid, mana_*}` + trailing = `anchor.memory`
 2. One (or chunked) `debug_io_event` + trailing = **opaque** concatenation of raw monitor frames in `io_bytes` — **no** re-parse/re-encode of Copy/Data/Drain
 3. `debug_session.sync`
-4. Window unchanged (unless a separate `rotate`)
+4. Window unchanged for `dump`; cleared after step 3 for `dump_and_clear`
 
 Seal/fail store only on **`stop_recording`**.
 
@@ -180,6 +189,7 @@ No `INITIAL_*` / `BUFFER_*`.
 | Store session lifetime | Until **stop recording** |
 | Log ingress | Socket per target; forward 1:1 to store |
 | Who monitors | **Recorder** calls `monitor` |
+| dump_and_clear | In API: dump then clear `io_bytes` (no new snap) |
 | dump_and_rotate | Not in v1 |
 | Shield API | Synced: `monitor_config` + `save_result` |
 | Topology | After first anchor: bindings + registries to store; BIND frames opaque; mid-session bind refreshes peer registry |

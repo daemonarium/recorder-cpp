@@ -29,11 +29,17 @@ Requires [`kernel-shield`](../kernel-shield/) and [`debug-store`](../debug-store
 
 | Socket | Role |
 |--------|------|
-| 0 | USER — `recorder` RPC (`start_recording`, `stop_recording`, `dump`, `rotate`) |
+| 0 | USER — `recorder` RPC (`start_recording`, `stop_recording`, `dump`, `dump_and_clear`, `rotate`) |
 | 1 | SHIELD — outbound to kernel-shield USER |
 | ≥2 | per-target monitor, log ingress, store USER (temp), store session |
 
-Host must bind `recorder.1 ↔ kernel-shield.0` before use. On `start_recording`, the module binds to debug-store via `shield.bind`, calls `begin`, then monitors/saves the target through shield. Pass target WASM bytes in `start_recording.code` (empty OK for LocalProcess); recorder dumps them to store as `code.wasm` and clears the session copy.
+Host must bind `recorder.1 ↔ kernel-shield.0` before use. On `start_recording`, the module binds to debug-store via `shield.bind`, calls `begin`, then monitors/saves the target through shield (monitor + log channels use **flat** message framing). Pass target WASM bytes in `start_recording.code` (empty OK for LocalProcess); recorder dumps them to store as `code.wasm` and clears the session copy.
+
+| RPC | Window after persist |
+|-----|----------------------|
+| `dump` | unchanged (snapshot; store appends `io.bin`) |
+| `dump_and_clear` | `io_bytes` cleared (no new save/anchor) |
+| `rotate` | cut to new snap (see [DESIGN.md](./DESIGN.md)) |
 
 `g_own_process_id` defaults to `3` (must match the recorder pid in the kernel).
 
@@ -49,8 +55,10 @@ npm test -w @wa-os/recorder-tests
 
 Harness: Kernel + kernel-shield + mock kernel RPC + debug-store + ts-fs + recorder.
 
-- Synthetic scenarios (`recorder.test.ts`): invalid `k`, start, code dump, dump, rotate, dump-on-error, `record_mana=false` (LocalProcess stub + injected monitor frames).
+- Synthetic scenarios (`recorder.test.ts`): invalid `k`, start, code dump, dump / dump-twice / `dump_and_clear`, rotate, dump-on-error, `record_mana=false` (LocalProcess stub + injected monitor frames).
 - E2E (`recorder.e2e.test.ts`): real [`mock-module.wasm`](../kernel-shield/cpp-test/src/mock_module.cpp) bytes in `start_recording.code` → echo traffic → `kernel.kill(..., error)` → assert `sessions/<id>/{meta.bin,code.wasm,bindings.bin,snap.*.bin,snap.*.meta.bin,io.bin}` and `waosrec pack` round-trip.
+
+Full stack gate (from repo root): see [`TESTING.md`](../TESTING.md) (`npm run gate`).
 
 ## RPC contract
 

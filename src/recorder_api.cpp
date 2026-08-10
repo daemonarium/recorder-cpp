@@ -47,6 +47,15 @@ namespace waos {
     co_return;
   }
 
+  std::shared_ptr<serialization::promise<void>> recorder::dump_and_clear(std::uint64_t recording_id) {
+    auto rec = get_recording(recording_id);
+    if(!rec) {
+      throw recorder_not_found("recording not found");
+    }
+    co_await rec->dump_and_clear();
+    co_return;
+  }
+
   std::shared_ptr<serialization::promise<void>> recorder::rotate(std::uint64_t recording_id) {
     auto rec = get_recording(recording_id);
     if(!rec) {

@@ -147,7 +147,7 @@ namespace waos {
   }
 
   void recording::setup_monitor_channel() {
-    monitor_channel_ = std::make_unique<serialization::socket_message_channel>(monitor_socket_);
+    monitor_channel_ = std::make_unique<serialization::flat_socket_message_channel>(monitor_socket_);
     // Wire indices must match kernel ProcessMonitorEmitter (rpc_* then process_*).
     monitor_channel_->register_message_type<serialization::rpc_request>();
     monitor_channel_->register_message_type<serialization::rpc_response>();
@@ -168,7 +168,7 @@ namespace waos {
     auto self = shared_from_this();
 
     monitor_channel_->on_message<process_save_event>([self](process_save_event& ev, size_t payload_size) {
-      size_t msg_len = self->monitor_channel_->reader().read_offset_ + payload_size;
+      size_t msg_len = self->monitor_channel_->reader().cursor() + payload_size;
       auto frame = self->capture_current_frame(msg_len);
       self->on_save_event(ev.snapshot_uid, std::move(frame));
     });
@@ -182,7 +182,7 @@ namespace waos {
     });
 
     auto on_io = [self](auto&, size_t payload_size) {
-      size_t msg_len = self->monitor_channel_->reader().read_offset_ + payload_size;
+      size_t msg_len = self->monitor_channel_->reader().cursor() + payload_size;
       self->on_io_frame(self->capture_current_frame(msg_len));
     };
     monitor_channel_->on_message<process_copy_event>(on_io);
@@ -190,21 +190,21 @@ namespace waos {
     monitor_channel_->on_message<process_drain_event>(on_io);
     monitor_channel_->on_message<process_measure_mana_event>([self](process_measure_mana_event&, size_t payload_size) {
       if(!self->request_.config.record_mana) return;
-      size_t msg_len = self->monitor_channel_->reader().read_offset_ + payload_size;
+      size_t msg_len = self->monitor_channel_->reader().cursor() + payload_size;
       self->on_io_frame(self->capture_current_frame(msg_len));
     });
     monitor_channel_->on_message<process_set_mana_limit_event>([self](process_set_mana_limit_event&, size_t payload_size) {
       if(!self->request_.config.record_mana) return;
-      size_t msg_len = self->monitor_channel_->reader().read_offset_ + payload_size;
+      size_t msg_len = self->monitor_channel_->reader().cursor() + payload_size;
       self->on_io_frame(self->capture_current_frame(msg_len));
     });
     monitor_channel_->on_message<process_bind_event>([self](process_bind_event& ev, size_t payload_size) {
-      size_t msg_len = self->monitor_channel_->reader().read_offset_ + payload_size;
+      size_t msg_len = self->monitor_channel_->reader().cursor() + payload_size;
       self->on_io_frame(self->capture_current_frame(msg_len));
       self->queue_registry_refresh(ev.peer_process, static_cast<std::uint32_t>(ev.peer_socket));
     });
     monitor_channel_->on_message<process_unbind_event>([self](process_unbind_event&, size_t payload_size) {
-      size_t msg_len = self->monitor_channel_->reader().read_offset_ + payload_size;
+      size_t msg_len = self->monitor_channel_->reader().cursor() + payload_size;
       self->on_io_frame(self->capture_current_frame(msg_len));
     });
 
@@ -214,7 +214,7 @@ namespace waos {
   }
 
   void recording::setup_log_channel() {
-    log_channel_ = std::make_unique<serialization::socket_message_channel>(log_socket_);
+    log_channel_ = std::make_unique<serialization::flat_socket_message_channel>(log_socket_);
     log_channel_->register_message_type<serialization::rpc_request>();
     log_channel_->register_message_type<serialization::rpc_response>();
     log_channel_->register_message_type<serialization::rpc_error>();
@@ -225,18 +225,21 @@ namespace waos {
     log_channel_->register_message_type<debug_metrics_event>();
 
     auto self = shared_from_this();
-    auto forward = [self](auto&, size_t payload_size) {
+    auto forward_payload = [self](size_t payload_size) {
       auto* sock = get_socket_info(self->log_socket_);
-      size_t msg_len = self->log_channel_->reader().read_offset_ + payload_size;
+      size_t msg_len = self->log_channel_->reader().cursor() + payload_size;
       std::vector<std::uint8_t> frame(sizeof(std::uint32_t) + msg_len);
       std::uint32_t len32 = static_cast<std::uint32_t>(msg_len);
       std::memcpy(frame.data(), &len32, sizeof(len32));
       circular_buffer_peek(&sock->input_buffer, 0, frame.data() + sizeof(len32), msg_len);
       self->forward_log_frame(std::move(frame));
     };
-    log_channel_->on_message<debug_logs_event>(forward);
-    log_channel_->on_message<debug_spans_event>(forward);
-    log_channel_->on_message<debug_metrics_event>(forward);
+    log_channel_->on_message<debug_logs_event>(
+      [forward_payload](debug_logs_event&, size_t payload_size) { forward_payload(payload_size); });
+    log_channel_->on_message<debug_spans_event>(
+      [forward_payload](debug_spans_event&, size_t payload_size) { forward_payload(payload_size); });
+    log_channel_->on_message<debug_metrics_event>(
+      [forward_payload](debug_metrics_event&, size_t payload_size) { forward_payload(payload_size); });
 
     socket_handlers::register_socket_handler(log_socket_, [self]() {
       self->handle_log_data();
@@ -557,7 +560,7 @@ namespace waos {
 
     co_await send_io_blob(io_bytes_);
 
-    store_session_rpc<serialization::compressed_socket_rpc_client*> session_rpc(store_session_client_.get());
+    store_session_rpc<serialization::flat_socket_rpc_client*> session_rpc(store_session_client_.get());
     co_await session_rpc.sync();
 
     if(state_ == recording_state::Dumping) {
@@ -571,6 +574,16 @@ namespace waos {
       throw recorder_invalid_argument("recording not ready for dump");
     }
     return dump_window();
+  }
+
+  std::shared_ptr<serialization::promise<void>> recording::dump_and_clear() {
+    if(state_ == recording_state::Stopping || state_ == recording_state::Starting) {
+      throw recorder_invalid_argument("recording not ready for dump_and_clear");
+    }
+    co_await dump_window();
+    // Persist then drop the I/O window (no new save/anchor — unlike rotate).
+    io_bytes_.clear();
+    co_return;
   }
 
   std::shared_ptr<serialization::promise<void>> recording::rotate() {
@@ -622,7 +635,7 @@ namespace waos {
     // Bind to store USER and begin session
     store_user_socket_ = alloc_socket();
     open_socket(store_user_socket_);
-    store_user_client_ = std::make_unique<serialization::compressed_socket_rpc_client>(store_user_socket_);
+    store_user_client_ = std::make_unique<serialization::flat_socket_rpc_client>(store_user_socket_);
     store_user_client_->register_basic_types();
     {
       auto client_ptr = store_user_client_.get();
@@ -642,14 +655,14 @@ namespace waos {
       .process_id = request_.target_process,
       .labels = request_.labels,
     };
-    store_rpc<serialization::compressed_socket_rpc_client*> store(store_user_client_.get());
+    store_rpc<serialization::flat_socket_rpc_client*> store(store_user_client_.get());
     auto begin_res = co_await store.begin(begin_req);
     store_session_id_ = begin_res.session_id;
     store_remote_session_socket_ = begin_res.store_socket;
 
     store_session_socket_ = alloc_socket();
     open_socket(store_session_socket_);
-    store_session_client_ = std::make_unique<serialization::compressed_socket_rpc_client>(store_session_socket_);
+    store_session_client_ = std::make_unique<serialization::flat_socket_rpc_client>(store_session_socket_);
     store_session_client_->register_basic_types();
     setup_store_session_messages();
     {
@@ -692,7 +705,7 @@ namespace waos {
     }
 
     co_await capture_initial_topology();
-    store_session_rpc<serialization::compressed_socket_rpc_client*> session_rpc(store_session_client_.get());
+    store_session_rpc<serialization::flat_socket_rpc_client*> session_rpc(store_session_client_.get());
     co_await session_rpc.sync();
     co_return;
   }
