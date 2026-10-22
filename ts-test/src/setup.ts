@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import os from 'node:os'
 import fsp from 'node:fs/promises'
 
-import { Kernel, ModuleProcess, LocalProcess, Direction } from '@wa-os/ts-kernel'
+import { Kernel, ModuleProcess, LocalProcess, Direction, kernelApi } from '@daemonarium/kernel'
 import {
   SocketRpcClient,
   SocketRpcServer,
@@ -22,14 +22,8 @@ import {
   type SocketOptions,
   type LocalSocket,
   type TypeRegistry as TR,
-} from '@wa-os/ts-rpc'
-import {
-  createGeneratedTypeRegistry,
-  direction,
-  monitor_flag,
-  type save_result,
-} from '@wa-os/ts-kernel/src/kernelApi.js'
-import { createFsProcess, type FsProcessHandle } from '@wa-os/ts-fs'
+} from '@daemonarium/rpc'
+import { createFsProcess, type FsProcessHandle } from '@daemonarium/fs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -131,7 +125,7 @@ function installKernelMock(
     return processId
   }
 
-  kernelTypes['kernel_save'].implementation = async (id: number): Promise<save_result> => {
+  kernelTypes['kernel_save'].implementation = async (id: number): Promise<kernelApi.save_result> => {
     const call: MockKernelCall = { method: 'kernel.save', args: [id] }
     kernelCalls.push(call)
     try {
@@ -155,7 +149,7 @@ function installKernelMock(
     socket_from: number,
     process_to: number,
     socket_to: number,
-    bindDirection: direction
+    bindDirection: kernelApi.direction
   ) => {
     const call: MockKernelCall = {
       method: 'kernel.bind',
@@ -170,7 +164,7 @@ function installKernelMock(
     socket_from: number,
     process_to: number,
     socket_to: number,
-    unbindDirection: direction
+    unbindDirection: kernelApi.direction
   ) => {
     const call: MockKernelCall = {
       method: 'kernel.unbind',
@@ -275,9 +269,9 @@ export async function setupTestEnvironment(rootDir: string): Promise<TestContext
   const kernel = new Kernel()
   const kernelCalls: MockKernelCall[] = []
 
-  const shieldCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/kernel-shield.wasm'))
-  const storeCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/debug-store.wasm'))
-  const recorderCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/recorder.wasm'))
+  const shieldCode = await readFile(join(__dirname, '../../extern/kernel-shield-cpp/build-web/kernel-shield.wasm'))
+  const storeCode = await readFile(join(__dirname, '../../extern/debug-store-cpp/build-web/debug-store.wasm'))
+  const recorderCode = await readFile(join(__dirname, '../../build-web/recorder.wasm'))
 
   const shield = new ModuleProcess(kernel, SHIELD_ID, 2048, 5_000_000)
   await shield.setModuleCode(shieldCode)
@@ -317,7 +311,7 @@ export async function setupTestEnvironment(rootDir: string): Promise<TestContext
   client.bind(shield, 3, 3, Direction.BOTH)
 
   // Kernel mock on client socket 1
-  const { registry: kernelRegistry, types: kernelTypes } = createGeneratedTypeRegistry()
+  const { registry: kernelRegistry, types: kernelTypes } = kernelApi.createGeneratedTypeRegistry()
   installKernelMock(kernel, kernelTypes, kernelCalls)
   kernelRegistry.assignMethodIds()
   const kernelCodecs = new CodecRegistry()
@@ -408,12 +402,12 @@ export async function setupWasmTargetEnvironment(
   const kernel = new Kernel()
   const kernelCalls: MockKernelCall[] = []
 
-  const shieldCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/kernel-shield.wasm'))
-  const storeCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/debug-store.wasm'))
-  const recorderCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/recorder.wasm'))
+  const shieldCode = await readFile(join(__dirname, '../../extern/kernel-shield-cpp/build-web/kernel-shield.wasm'))
+  const storeCode = await readFile(join(__dirname, '../../extern/debug-store-cpp/build-web/debug-store.wasm'))
+  const recorderCode = await readFile(join(__dirname, '../../build-web/recorder.wasm'))
   const targetCode = await readFile(
     options?.targetWasmPath ??
-      join(__dirname, '../../../cmake-build-emscripten/kernel-shield/cpp-test/mock-module.wasm')
+      join(__dirname, '../../extern/kernel-shield-cpp/build-web/kernel-shield/cpp-test/mock-module.wasm')
   )
 
   const shield = new ModuleProcess(kernel, SHIELD_ID, 2048, 5_000_000)
@@ -453,7 +447,7 @@ export async function setupWasmTargetEnvironment(
   client.bind(shield, 1, 1, Direction.BOTH)
   client.bind(shield, 3, 3, Direction.BOTH)
 
-  const { registry: kernelRegistry, types: kernelTypes } = createGeneratedTypeRegistry()
+  const { registry: kernelRegistry, types: kernelTypes } = kernelApi.createGeneratedTypeRegistry()
   installKernelMock(kernel, kernelTypes, kernelCalls)
   kernelRegistry.assignMethodIds()
   const kernelCodecs = new CodecRegistry()
@@ -634,9 +628,9 @@ async function bootstrapRecorderStack(rootDir: string): Promise<ShieldBootstrap>
   const kernel = new Kernel()
   const kernelCalls: MockKernelCall[] = []
 
-  const shieldCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/kernel-shield.wasm'))
-  const storeCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/debug-store.wasm'))
-  const recorderCode = await readFile(join(__dirname, '../../../cmake-build-emscripten/recorder.wasm'))
+  const shieldCode = await readFile(join(__dirname, '../../extern/kernel-shield-cpp/build-web/kernel-shield.wasm'))
+  const storeCode = await readFile(join(__dirname, '../../extern/debug-store-cpp/build-web/debug-store.wasm'))
+  const recorderCode = await readFile(join(__dirname, '../../build-web/recorder.wasm'))
 
   const shield = new ModuleProcess(kernel, SHIELD_ID, 2048, 5_000_000)
   await shield.setModuleCode(shieldCode)
@@ -669,7 +663,7 @@ async function bootstrapRecorderStack(rootDir: string): Promise<ShieldBootstrap>
   client.bind(shield, 1, 1, Direction.BOTH)
   client.bind(shield, 3, 3, Direction.BOTH)
 
-  const { registry: kernelRegistry, types: kernelTypes } = createGeneratedTypeRegistry()
+  const { registry: kernelRegistry, types: kernelTypes } = kernelApi.createGeneratedTypeRegistry()
   installKernelMock(kernel, kernelTypes, kernelCalls)
   kernelRegistry.assignMethodIds()
   const kernelCodecs = new CodecRegistry()
@@ -968,7 +962,7 @@ export function emitCopy(
         _type: 'process_copy_event',
         process: TARGET_ID,
         socket: 0,
-        direction: direction.OUT,
+        direction: kernelApi.direction.OUT,
         amount,
       },
       payload
@@ -990,7 +984,7 @@ export function emitBind(
       socket: localSocket,
       peer_process: peerProcess,
       peer_socket: peerSocket,
-      direction: direction.BOTH,
+      direction: kernelApi.direction.BOTH,
     })
   }
 }
@@ -1014,4 +1008,4 @@ export function emitMana(ctx: TestContext): void {
   }
 }
 
-export { monitor_flag }
+export const monitor_flag = kernelApi.monitor_flag

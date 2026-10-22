@@ -1,8 +1,8 @@
 import { expect } from 'chai'
 import fsp from 'node:fs/promises'
 import { join } from 'node:path'
-import { RpcException, SocketRpcClient, CodecRegistry, registerDynamicCodecs, ensureRpcCodecs, deserializeTypeRegistry } from '@wa-os/ts-rpc'
-import { LocalProcess, Direction } from '@wa-os/ts-kernel'
+import { RpcException, SocketRpcClient, CodecRegistry, registerDynamicCodecs, ensureRpcCodecs, deserializeTypeRegistry } from '@daemonarium/rpc'
+import { LocalProcess, Direction, kernelApi } from '@daemonarium/kernel'
 import {
   setupTestEnvironment,
   withTempRoot,
@@ -24,8 +24,8 @@ import {
 async function registerWithShield(
   ctx: {
     client: LocalProcess
-    shield: import('@wa-os/ts-kernel').ModuleProcess
-    recorder: import('@wa-os/ts-kernel').ModuleProcess
+    shield: import('@daemonarium/kernel').ModuleProcess
+    recorder: import('@daemonarium/kernel').ModuleProcess
   },
   processId: number
 ): Promise<void> {
@@ -214,7 +214,7 @@ describe('recorder WASM', () => {
           drainEventThreshold: 4,
           flags: 0,
         })
-        await ctx.kernel.bind(TARGET_ID, 0, peerId, 0, Direction.BOTH)
+        await ctx.kernel.bind(TARGET_ID, 0, peerId, 0, kernelApi.direction.BOTH)
         await registerWithShield(ctx, peerId)
 
         const result = await ctx.userClient.call(ctx.methodId('start_recording'), {
@@ -263,8 +263,8 @@ describe('recorder WASM', () => {
           ctx.kernel.processes.push(null)
         }
         ctx.kernel.processes[peerId] = peer
-        const { createGeneratedTypeRegistry } = await import('@wa-os/ts-kernel/src/kernelApi.js')
-        peer.setRpcDescription(0, createGeneratedTypeRegistry().registry)
+        const { kernelApi: kernelApiDyn } = await import('@daemonarium/kernel')
+        peer.setRpcDescription(0, kernelApiDyn.createGeneratedTypeRegistry().registry)
         await registerWithShield(ctx, peerId)
 
         const result = await ctx.userClient.call(ctx.methodId('start_recording'), {

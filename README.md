@@ -1,69 +1,93 @@
 # recorder
 
-WASM module: multi-target process recording (in-RAM I/O window + snapshot rotation) with live log/span/metric forward to [`debug-store`](../debug-store/).
+A WebAssembly module that records processes into an in-RAM window
+and writes the session through debug-store. The native `waosrec`
+tool packs that session directory into one `.waosrec` file.
 
-**Design:** [`DESIGN.md`](./DESIGN.md)
+This repository is `daemonarium/recorder-cpp`. The artifacts are
+`recorder.wasm` and `waosrec`. It is not an npm package.
+
+## Why it is a separate module
+
+The kernel only emits monitor events and `save`. `kernel-shield` is
+the capability boundary: monitor, save, and bind. `debug-store` only
+writes bytes. Rotation, dump-on-error, and live log forwarding live
+here, so a later Wasm VM loads the same file.
+
+`module-debugger` reads `.waosrec`. It is not in this repo.
 
 ## Build
 
-From the repo root (Emscripten / `WASM=ON` tree, same as other modules):
+Stock Clang cannot compile this module or the packer. Build the
+[reflection-toolchain](https://github.com/daemonarium/reflection-toolchain)
+sysroot and point `P2996_COMPILER_SYSROOT` at it.
 
-```bash
-cmake -S . -B cmake-build-emscripten -DWASM=ON
-cmake --build cmake-build-emscripten --target recorder-wasm
-# outputs cmake-build-emscripten/recorder.wasm
+This module compiles sources from
+[rpc-cpp](https://github.com/daemonarium/rpc-cpp) `v0.1.0`:
+
+```
+git submodule add https://github.com/daemonarium/rpc-cpp.git extern/rpc-cpp
+cd extern/rpc-cpp && git checkout v0.1.0
 ```
 
-Native packer CLI (non-WASM build):
+Wasm:
 
-```bash
-cmake -S . -B cmake-build-debug
-cmake --build cmake-build-debug --target waosrec   # or build/ if that’s your tree
-# waosrec pack <session-dir> -o out.waosrec
-# waosrec info out.waosrec
+```
+cmake -B build-web -S . \
+  -DCMAKE_TOOLCHAIN_FILE=$P2996_COMPILER_SYSROOT/toolchain/emscripten-p2996-toolchain.cmake \
+  -DWASM=ON
+cmake --build build-web --target recorder-wasm
 ```
 
-Requires [`kernel-shield`](../kernel-shield/) and [`debug-store`](../debug-store/) for the intended topology.
+`build-web/recorder.wasm` exports `_rpc_description`, `_start`,
+`_malloc`, `_waos_socket_data`, and `_waos_socket_output_drain`.
 
-## Topology
+Native packer, with the reflection toolchain rather than Emscripten:
+
+```
+cmake -B build -S . \
+  -DCMAKE_TOOLCHAIN_FILE=$P2996_COMPILER_SYSROOT/toolchain/p2996-toolchain.cmake
+cmake --build build --target waosrec
+```
+
+`kernel-shield.wasm`, `debug-store.wasm`, and `mock-module.wasm`
+come from
+[kernel-shield-cpp](https://github.com/daemonarium/kernel-shield-cpp)
+and
+[debug-store-cpp](https://github.com/daemonarium/debug-store-cpp)
+at `v0.1.0`. They are not linked into this module.
+
+## How a host runs it
+
+The recorder's process id is 3. `@daemonarium/kernel` loads the three
+wasm modules. Bind recorder socket 1 to kernel-shield socket 0 before
+`start_recording`. Bind the `@daemonarium/fs` socket to debug-store
+socket 1 before the first session.
+
+See [docs/examples.md](docs/examples.md).
+
+```
+waosrec pack sessions/1 -o session.waosrec
+waosrec info session.waosrec
+```
+
+## Sockets and the window
 
 | Socket | Role |
 |--------|------|
-| 0 | USER — `recorder` RPC (`start_recording`, `stop_recording`, `dump`, `dump_and_clear`, `rotate`) |
-| 1 | SHIELD — outbound to kernel-shield USER |
-| ≥2 | per-target monitor, log ingress, store USER (temp), store session |
+| 0 | User API. `start_recording`, `stop_recording`, `dump`, `dump_and_clear`, `rotate`. |
+| 1 | Outbound to kernel-shield socket 0. |
+| 2 and up | Per-target monitor, log ingress, and the debug-store session. |
 
-Host must bind `recorder.1 ↔ kernel-shield.0` before use. On `start_recording`, the module binds to debug-store via `shield.bind`, calls `begin`, then monitors/saves the target through shield. USER RPC and monitor/log channels use **flat** (`flat_socket_rpc_*` / flat message framing). Pass target WASM bytes in `start_recording.code` (empty OK for LocalProcess); recorder dumps them to store as `code.wasm` and clears the session copy. Fixture harnesses prefer **`dump_and_clear`** over bare `dump` when `dump_on_error` may still fire.
+`dump` leaves the window in place. `dump_and_clear` clears
+`io_bytes`. `rotate` cuts a new snapshot. `event_buffer_snapshot_mult`
+is 1 or 2.
 
-| RPC | Window after persist |
-|-----|----------------------|
-| `dump` | unchanged (snapshot; store appends `io.bin`) |
-| `dump_and_clear` | `io_bytes` cleared (no new save/anchor) |
-| `rotate` | cut to new snap (see [DESIGN.md](./DESIGN.md)) |
+The contract, method ids, and `.waosrec` layout are in
+[docs/architecture.md](docs/architecture.md). The design note is
+[DESIGN.md](DESIGN.md).
 
-`g_own_process_id` defaults to `3` (must match the recorder pid in the kernel).
+## License
 
-## Tests
-
-```bash
-# build required WASMs first (mock-module = e2e echo target)
-cmake --build cmake-build-emscripten --target mock-module recorder-wasm kernel-shield debug-store
-cmake --build cmake-build-debug --target waosrec   # for e2e pack round-trip; or build/
-npm install
-npm test -w @wa-os/recorder-tests
-```
-
-Harness: Kernel + kernel-shield + mock kernel RPC + debug-store + ts-fs + recorder.
-
-- Synthetic scenarios (`recorder.test.ts`): invalid `k`, start, code dump, dump / dump-twice / `dump_and_clear`, rotate, dump-on-error, `record_mana=false` (LocalProcess stub + injected monitor frames).
-- E2E (`recorder.e2e.test.ts`): real [`mock-module.wasm`](../kernel-shield/cpp-test/src/mock_module.cpp) bytes in `start_recording.code` → echo traffic → `kernel.kill(..., error)` → assert `sessions/<id>/{meta.bin,code.wasm,bindings.bin,snap.*.bin,snap.*.meta.bin,io.bin}` and `waosrec pack` round-trip.
-
-Full stack gate (from repo root): see [`TESTING.md`](../TESTING.md) (`npm run gate`).
-
-## RPC contract
-
-Types: [`cpp-rpc/src/examples/structures/recorder.hpp`](../cpp-rpc/src/examples/structures/recorder.hpp)
-
-`record_config.event_buffer_snapshot_mult` must be `1` or `2`.
-
-`.waosrec` format: [`src/waosrec.hpp`](./src/waosrec.hpp).
+MIT. Upstream notices are in `NOTICE`. Conduct is in
+`CODE_OF_CONDUCT.md`.

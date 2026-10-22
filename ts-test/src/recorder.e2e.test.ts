@@ -5,8 +5,8 @@ import { constants as fsConstants } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
-import { LocalProcess, Direction } from '@wa-os/ts-kernel'
-import { SocketRpcClient, CodecRegistry, registerDynamicCodecs, ensureRpcCodecs, deserializeTypeRegistry } from '@wa-os/ts-rpc'
+import { LocalProcess, Direction, kernelApi } from '@daemonarium/kernel'
+import { SocketRpcClient, CodecRegistry, registerDynamicCodecs, ensureRpcCodecs, deserializeTypeRegistry } from '@daemonarium/rpc'
 import {
   setupWasmTargetEnvironment,
   withTempRoot,
@@ -25,13 +25,11 @@ const __dirname = dirname(__filename)
 
 const MOCK_MODULE_WASM = join(
   __dirname,
-  '../../../cmake-build-emscripten/kernel-shield/cpp-test/mock-module.wasm'
+  '../../extern/kernel-shield-cpp/build-web/kernel-shield/cpp-test/mock-module.wasm'
 )
 
 const WAOSREC_BIN_CANDIDATES = [
-  join(__dirname, '../../../build/waosrec'),
-  join(__dirname, '../../../cmake-build-debug/waosrec'),
-  join(__dirname, '../../../cmake-build/waosrec'),
+  join(__dirname, '../../build/waosrec'),
 ]
 
 async function resolveWaosrecBin(): Promise<string | null> {
@@ -49,8 +47,8 @@ async function resolveWaosrecBin(): Promise<string | null> {
 async function registerWithShield(
   ctx: {
     client: LocalProcess
-    shield: import('@wa-os/ts-kernel').ModuleProcess
-    recorder: import('@wa-os/ts-kernel').ModuleProcess
+    shield: import('@daemonarium/kernel').ModuleProcess
+    recorder: import('@daemonarium/kernel').ModuleProcess
   },
   processId: number
 ): Promise<void> {
@@ -211,18 +209,18 @@ describe('recorder WASM e2e (real mock-module target)', () => {
         await tick(20)
 
         const peerId = 30
-        const { createGeneratedTypeRegistry } = await import('@wa-os/ts-kernel/src/kernelApi.js')
+        const { kernelApi: kernelApiDyn } = await import('@daemonarium/kernel')
         const peer = new LocalProcess(ctx.kernel, peerId, 1_000_000)
         while (ctx.kernel.processes.length <= peerId) {
           ctx.kernel.processes.push(null)
         }
         ctx.kernel.processes[peerId] = peer
         peer.createSocket(0, SOCKET_OPTS)
-        peer.setRpcDescription(0, createGeneratedTypeRegistry().registry)
+        peer.setRpcDescription(0, kernelApiDyn.createGeneratedTypeRegistry().registry)
         await registerWithShield(ctx, peerId)
 
         // Real kernel bind emits process_bind_event to monitors with BIND.
-        await ctx.kernel.bind(TARGET_ID, 0, peerId, 0, Direction.BOTH)
+        await ctx.kernel.bind(TARGET_ID, 0, peerId, 0, kernelApi.direction.BOTH)
         await tick(100)
 
         await ctx.userClient.call(ctx.methodId('dump'), result.recording_id)

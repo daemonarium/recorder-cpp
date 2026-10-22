@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  wasm:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: daemonarium/rpc-cpp
+          ref: v0.1.0
+          path: extern/rpc-cpp
+      - uses: actions/checkout@v4
+        with:
+          repository: daemonarium/kernel-shield-cpp
+          ref: v0.1.0
+          path: extern/kernel-shield-cpp
+      - uses: actions/checkout@v4
+        with:
+          repository: daemonarium/debug-store-cpp
+          ref: v0.1.0
+          path: extern/debug-store-cpp
+      - uses: actions/checkout@v4
+        with:
+          repository: daemonarium/reflection-toolchain
+          ref: v0.1.0
+          path: reflection-toolchain
+      - name: Pin sibling rpc-cpp checkouts
+        run: |
+          mkdir -p extern/kernel-shield-cpp/extern extern/debug-store-cpp/extern
+          ln -s ../../rpc-cpp extern/kernel-shield-cpp/extern/rpc-cpp
+          ln -s ../../rpc-cpp extern/debug-store-cpp/extern/rpc-cpp
+      - uses: actions/cache@v4
+        id: sysroot
+        with:
+          path: reflection-toolchain/sysroot
+          key: sysroot-v0.1.0-${{ hashFiles('reflection-toolchain/upstream-commits.txt') }}
+      - name: Build sysroot
+        if: steps.sysroot.outputs.cache-hit != 'true'
+        working-directory: reflection-toolchain
+        run: ./build-sysroot.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ts-test/package-lock.json
+      - name: Configure and build Wasm modules
+        env:
+          P2996_COMPILER_SYSROOT: ${{ github.workspace }}/reflection-toolchain/sysroot
+        run: |
+          cmake -B extern/kernel-shield-cpp/build-web -S extern/kernel-shield-cpp \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/reflection-toolchain/toolchain/emscripten-p2996-toolchain.cmake" \
+            -DWASM=ON
+          cmake --build extern/kernel-shield-cpp/build-web --target kernel-shield mock-module
+          cmake -B extern/debug-store-cpp/build-web -S extern/debug-store-cpp \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/reflection-toolchain/toolchain/emscripten-p2996-toolchain.cmake" \
+            -DWASM=ON
+          cmake --build extern/debug-store-cpp/build-web --target debug-store
+          cmake -B build-web -S . \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/reflection-toolchain/toolchain/emscripten-p2996-toolchain.cmake" \
+            -DWASM=ON
+          cmake --build build-web --target recorder-wasm
+      - name: Build native packer
+        env:
+          P2996_COMPILER_SYSROOT: ${{ github.workspace }}/reflection-toolchain/sysroot
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/reflection-toolchain/toolchain/p2996-toolchain.cmake"
+          cmake --build build --target waosrec waosrec_ut
+          ./build/tests/waosrec_ut
+      - name: Host harness
+        working-directory: ts-test
+        run: |
+          npm ci
+          npm test

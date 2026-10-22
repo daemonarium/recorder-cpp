@@ -1,0 +1,25 @@
+recorder-cpp
+Copyright (c) 2026 Magowie Sp. z o.o.
+
+This module must be built with the reflection-toolchain sysroot:
+https://github.com/daemonarium/reflection-toolchain
+
+It compiles socket and io sources from daemonarium/rpc-cpp v0.1.0:
+https://github.com/daemonarium/rpc-cpp
+
+Shield method ids match daemonarium/kernel-shield-cpp v0.1.0:
+https://github.com/daemonarium/kernel-shield-cpp
+
+Store method ids match daemonarium/debug-store-cpp v0.1.0:
+https://github.com/daemonarium/debug-store-cpp
+
+Reflection support comes from Bloomberg's clang-p2996 and its libcxx
+(Apache License 2.0 with LLVM Exceptions), distributed via the
+toolchain repo. This repository does not bundle that compiler.
+
+The host-side test harness depends on @daemonarium/kernel 0.1.0,
+@daemonarium/rpc 0.1.0, and @daemonarium/fs 0.1.0. The disk sink is
+that fs package. This module does not link node:fs.
+
+waosrec_ut uses boost-ext/ut v2.0.0 (Boost Software License):
+https://github.com/boost-ext/ut

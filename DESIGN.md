@@ -1,8 +1,9 @@
 # Recorder (WASM) — design notes
 
 Status: **implemented** (see [`README.md`](./README.md)).  
-Sibling: [`debug-store`](../debug-store/) (persistence sink).  
-Kernel model: [`ts-kernel/README.md`](../ts-kernel/README.md) — *Process recording and replay*.
+Sibling: [debug-store-cpp](https://github.com/daemonarium/debug-store-cpp) (persistence sink).  
+Kernel model: [kernel-ts](https://github.com/daemonarium/kernel-ts) — process recording and replay.  
+Capability boundary: [kernel-shield-cpp](https://github.com/daemonarium/kernel-shield-cpp).
 
 This document captures agreed decisions. Update it when the design changes.
 
