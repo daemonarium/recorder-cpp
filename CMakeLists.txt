@@ -4,10 +4,14 @@ project(recorder)
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(RPC_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/rpc-cpp)
-if(NOT EXISTS ${RPC_CPP_DIR}/CMakeLists.txt)
-  message(FATAL_ERROR
-    "rpc-cpp not found. git submodule add https://github.com/daemonarium/rpc-cpp.git extern/rpc-cpp")
+if(TARGET cpp_rpc)
+  set(RPC_CPP_DIR ${CMAKE_SOURCE_DIR}/daemonarium/rpc/rpc-cpp)
+else()
+  set(RPC_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/rpc-cpp)
+  if(NOT EXISTS ${RPC_CPP_DIR}/CMakeLists.txt)
+    message(FATAL_ERROR
+      "rpc-cpp not found. git submodule add https://github.com/daemonarium/rpc-cpp.git extern/rpc-cpp")
+  endif()
 endif()
 
 include_directories(src)
